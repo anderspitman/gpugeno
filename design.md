@@ -104,7 +104,8 @@ Observed on 2026-09-15:
 - NVIDIA driver 550.163.01
 - CUDA toolkit 12.4; `nvcc` is `/usr/local/cuda/bin/nvcc`
 - Vulkan instance 1.4.328; NVIDIA devices expose Vulkan 1.3.277
-- `rustc`, `cargo`, and `samtools` were not visible on `PATH`
+- Rust stable is installed under `/home/agent/.cargo/bin` (`rustc` and `cargo` 1.98.1), but that directory was not present in the observed `PATH`
+- `samtools` was not visible on `PATH`
 
 The canonical initial real-world input is:
 
