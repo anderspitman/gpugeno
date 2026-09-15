@@ -1,7 +1,7 @@
-# sfxproto design and project memory
+# gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** an initial Rust/CUDA integration spike has been selected; no `sfxproto` application has been implemented yet.
+**Current phase:** an initial Rust/CUDA integration spike has been selected; no `gpugeno` application has been implemented yet.
 
 ## Fresh-agent handoff
 
@@ -10,7 +10,7 @@ If a new coding agent is told only to read this document and continue, it should
 1. Treat this document as the project memory and source of current product intent.
 2. Verify the repository and toolchain state, because those observations may have changed since the last update.
 3. Work only on the **Immediate prerequisite: Rust/CUDA integration spike** below. Do not begin BAM/BGZF work or deferred backends until the spike is reviewed.
-4. Put new `sfxproto` application code at the project root. Treat `cubayes/` and `libshadowfax/` as read-only reference repositories unless the project owner explicitly decides otherwise.
+4. Put new `gpugeno` application code at the project root. Treat `cubayes/` and `libshadowfax/` as read-only reference repositories unless the project owner explicitly decides otherwise.
 5. Keep the spike intentionally small. It should test the selected Rust-to-CUDA boundary, not pre-design abstractions for hypothetical later slices.
 6. Investigate implementation details independently when they do not change product behavior. If a consequential choice or contradiction remains, ask the project owner one focused question at a time.
 7. Validate the spike with deterministic vectors, then update this document with the exact implementation, commands, timings, and discoveries before proposing the first true vertical slice.
@@ -19,7 +19,7 @@ The immediate next step is the vector-add integration spike. No BAM-processing s
 
 ## Purpose of this document
 
-This is the durable memory for `sfxproto`. Its goal is to let a future coding agent reconstruct the project as closely as practical without needing the original conversation.
+This is the durable memory for `gpugeno`. Its goal is to let a future coding agent reconstruct the project as closely as practical without needing the original conversation.
 
 It must preserve three kinds of information:
 
@@ -52,7 +52,7 @@ Status words used below:
 
 ## Project goal
 
-Build a command-line prototype named **`sfxproto`** for comparing GPU implementations of operations over BAM data.
+Build a command-line prototype named **`gpugeno`** for comparing GPU implementations of operations over BAM data.
 
 The original target was portable pileup derived from CuBayes. The first operation is now **flagstat**, because its small fixed-field classifier is a better way to establish and compare the CUDA, direct Vulkan, and native WebGPU/`wgpu` compute paths before attempting pileup.
 
@@ -173,7 +173,7 @@ The development environment may require the full CUDA and Vulkan development too
 The intended shape is:
 
 ```text
-sfxproto flagstat INPUT.bam [OPTIONS]
+gpugeno flagstat INPUT.bam [OPTIONS]
 ```
 
 Current option decisions:
@@ -226,7 +226,7 @@ Rust host vectors -> statically linked CUDA C API -> H2D copies
 
 ### Required behavior
 
-1. Create the root Rust project named `sfxproto`.
+1. Create the root Rust project named `gpugeno`.
 2. Have the Cargo build invoke `nvcc` for a `.cu` implementation and link the resulting static native code plus the CUDA runtime into the Rust executable.
 3. Expose a small, explicitly C-compatible API. C++ name mangling or C++ types must not cross the boundary.
 4. Select one CUDA device by numeric index.
@@ -243,7 +243,7 @@ Do not add BAM, BAI, BGZF, libdeflate, `wgpu`, Vulkan, a general backend trait, 
 
 The spike succeeds when a clean build produces one Rust program that selects an RTX 3060, launches the statically linked CUDA vector-add kernel, validates the complete result, reports useful timings, and exits cleanly.
 
-The harness will be a **temporary Cargo example**, not an `sfxproto` subcommand or supported CLI surface. The intended invocation shape is:
+The harness will be a **temporary Cargo example**, not a `gpugeno` subcommand or supported CLI surface. The intended invocation shape is:
 
 ```bash
 cargo run --release --example cuda_vector_add -- --device 0 --elements 16777216
@@ -416,8 +416,8 @@ These are source observations, not yet reproduced test failures:
 - Mainline CuBayes does not contain a flagstat implementation; the kernel exists only in `libshadowfax`.
 - The old `libshadowfax` stream wrappers appear capable of returning `done`/`NULL` when a batch end reaches the EOF sentinel, potentially discarding the final batch. This must be tested, and accidental wrapper behavior must not define compatibility.
 - The old partitioner sometimes skips a single oversized window or zero-byte spans. That behavior is unsafe as a whole-file correctness contract and must not be copied without proving complete coverage.
-- The old CPU decompression fallback allocates and frees a libdeflate decompressor for every BGZF block. `sfxproto` should prefer persistent worker-owned decompressors.
-- The old default path uses nvCOMP. `sfxproto` intentionally moves decompression to CPU libdeflate so that all GPU backends can share the same decompressed input path.
+- The old CPU decompression fallback allocates and frees a libdeflate decompressor for every BGZF block. `gpugeno` should prefer persistent worker-owned decompressors.
+- The old default path uses nvCOMP. `gpugeno` intentionally moves decompression to CPU libdeflate so that all GPU backends can share the same decompressed input path.
 
 ## Decision and discovery history
 
@@ -457,6 +457,10 @@ The approved immediate work is now only the Rust/CUDA vector-add integration spi
 
 Two meanings of “put CUDA in the Rust program” were compared. One is to compile CUDA host code and kernels into a static native archive linked into the final Rust executable, exposing a C ABI; no separate library is shipped. The other is to embed PTX/cubin/fatbin and manage the CUDA Driver API from Rust. The project owner prefers C APIs, so the statically linked C boundary was retained for the integration spike.
 
+### Project naming
+
+The prototype was initially called `sfxproto`. Before application code was created, it was renamed to **`gpugeno`**. The existing checkout paths containing `shadowfax` and the `libshadowfax` reference repository retain their names; they are not the application name.
+
 ### Other decisions
 
 - Native CLI first; avoid unnecessary barriers to a future browser host.
@@ -472,7 +476,7 @@ Two meanings of “put CUDA in the Rust program” were compared. One is to comp
 - The vector-add integration harness is a temporary Cargo example and may be removed once real CUDA functionality supersedes it.
 - Single GPU now; multi-GPU deferred despite three available GPUs.
 - Initial performance corpus is `HG002_chr22.bam`.
-- Program name is `sfxproto`, and flagstat is a subcommand to leave room for later operations.
+- Program name is `gpugeno`, and flagstat is a subcommand to leave room for later operations.
 
 ## Deferred possibilities, not a committed roadmap
 
