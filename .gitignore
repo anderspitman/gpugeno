@@ -1,0 +1,8 @@
+/target/
+/cubayes/
+/libshadowfax/
+*.swp
+*.bam
+*.bai
+*.cram
+*.crai

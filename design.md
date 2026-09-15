@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** an initial Rust/CUDA integration spike has been selected; no `gpugeno` application has been implemented yet.
+**Current phase:** the Rust/CUDA vector-add integration spike is implemented, coordinator-reviewed, and committed; the first true BAM vertical slice has not yet been selected.
 
 ## Fresh-agent handoff
 
@@ -9,13 +9,13 @@ If a new coding agent is told only to read this document and continue, it should
 
 1. Treat this document as the project memory and source of current product intent.
 2. Verify the repository and toolchain state, because those observations may have changed since the last update.
-3. Work only on the **Immediate prerequisite: Rust/CUDA integration spike** below. Do not begin BAM/BGZF work or deferred backends until the spike is reviewed.
+3. Do not reimplement the completed CUDA spike or begin BAM/BGZF work without approval. The next task is to review the spike results with the project owner and select the first true vertical slice.
 4. Put new `gpugeno` application code at the project root. Treat `cubayes/` and `libshadowfax/` as read-only reference repositories unless the project owner explicitly decides otherwise.
-5. Keep the spike intentionally small. It should test the selected Rust-to-CUDA boundary, not pre-design abstractions for hypothetical later slices.
+5. Prefer the smallest experiment that answers the next uncertainty; do not pre-design later slices.
 6. Investigate implementation details independently when they do not change product behavior. If a consequential choice or contradiction remains, ask the project owner one focused question at a time.
-7. Validate the spike with deterministic vectors, then update this document with the exact implementation, commands, timings, and discoveries before proposing the first true vertical slice.
+7. After each approved experiment, update this document with the exact implementation, commands, measurements, and discoveries before proposing further work.
 
-The immediate next step is the vector-add integration spike. No BAM-processing slice is approved yet.
+No BAM-processing slice is currently approved. The leading candidate is documented below.
 
 ## Purpose of this document
 
@@ -80,15 +80,20 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 
 ### Repository
 
-The project root currently contains:
+The root now contains a minimal Rust crate and temporary CUDA spike:
 
-- `idea.md`: the original pileup-oriented idea.
-- `design.md`: this document.
-- `cubayes/`: a clean CuBayes reference clone.
-- `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation.
-- `.gitignore`: ignores `/target` and alignment/index files.
+- `Cargo.toml` and `Cargo.lock`
+- `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
+- `src/lib.rs`: safe Rust owner around the opaque CUDA C context
+- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, CUDA host wrapper, and vector-add kernel
+- `examples/cuda_vector_add.rs`: temporary executable harness
+- `idea.md`: the original pileup-oriented idea
+- `design.md`: this document
+- `cubayes/`: a clean CuBayes reference clone
+- `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
+- `.gitignore`: ignores `/target` and alignment/index files
 
-There is currently no root Rust crate, executable, or application source tree. The root is a Git repository on branch `main`; it was initialized on 2026-09-15 with this design document as the first tracked file. `cubayes/` and `libshadowfax/` remain separate nested reference repositories and are not tracked by the root repository.
+The root is a Git repository on branch `main`. The spike, project metadata, and this design record are tracked. `cubayes/` and `libshadowfax/` remain separate nested reference repositories and are ignored by the root repository.
 
 Reference revisions at the time of this update:
 
@@ -104,7 +109,7 @@ Observed on 2026-09-15:
 - NVIDIA driver 550.163.01
 - CUDA toolkit 12.4; `nvcc` is `/usr/local/cuda/bin/nvcc`
 - Vulkan instance 1.4.328; NVIDIA devices expose Vulkan 1.3.277
-- Rust stable is installed under `/home/agent/.cargo/bin` (`rustc` and `cargo` 1.98.1), but that directory was not present in the observed `PATH`
+- Rust stable is installed under `/home/agent/.cargo/bin` (`rustc` and `cargo` 1.98.1), but that directory was not present in the observed `PATH`; `rustfmt` and `clippy` components were added during the spike
 - `samtools` was not visible on `PATH`
 
 The canonical initial real-world input is:
@@ -133,9 +138,10 @@ The development environment may require the full CUDA and Vulkan development too
 - [x] Selected the initial platform, input assumptions, CLI direction, and benchmark meaning.
 - [x] Decided to precede the first BAM vertical slice with a minimal Rust/CUDA integration spike.
 - [x] Selected a statically linked CUDA C API rather than Rust-managed embedded PTX for the spike.
-- [ ] Create the Rust project and run the CUDA vector-add spike.
-- [ ] Record what the spike proves or invalidates.
-- [ ] Decide the first true BAM/libdeflate/GPU vertical slice based on that result.
+- [x] Create the Rust project and run the CUDA vector-add spike.
+- [x] Review the spike, correct error-path resource/lifetime issues, and record what it proved.
+- [x] Commit the reviewed spike and project metadata.
+- [ ] Decide the first true BAM/libdeflate/GPU vertical slice based on the result.
 - [ ] Eventually complete an end-to-end CUDA flagstat run and validate `HG002_chr22.bam`.
 
 ## Current decisions
@@ -212,9 +218,9 @@ During a CUDA-only flagstat stage, requiring `--backend cuda` would be acceptabl
 - External comparisons with libshadowfax or samtools may exist as optional developer tools, not required tests.
 - A public CPU backend is deferred. A small host classifier may be used internally as a test oracle if it remains simple.
 
-## Immediate prerequisite: Rust/CUDA integration spike
+## Completed prerequisite: Rust/CUDA integration spike
 
-This is approved immediate work, but it is deliberately a technical spike rather than a true BAM-to-result vertical slice.
+This was deliberately a technical spike rather than a true BAM-to-result vertical slice.
 
 ### Goal
 
@@ -251,6 +257,37 @@ cargo run --release --example cuda_vector_add -- --device 0 --elements 16777216
 ```
 
 It may be deleted once the CUDA integration decisions have been carried into real functionality.
+
+### Implemented result
+
+The spike uses this boundary:
+
+```text
+Rust-owned vectors and safe `CudaContext`
+    -> fixed `extern "C"` API
+    -> CUDA C++ context owning one stream, six events, and reusable buffers
+    -> 256-thread bounds-checked CUDA vector-add kernel
+```
+
+`build.rs` runs `/usr/local/cuda/bin/nvcc` with C++17, `-O3`, `-arch=sm_86`, and PIC, archives the object with `ar`, and links `libgpugeno_cuda.a`, shared `libcudart`, and `libstdc++` into the Rust example. `NVCC` and `CUDA_HOME` override the defaults and are Cargo rebuild inputs. There is no project shared library, embedded PTX, CUDA Driver API crate, bindgen, or Cargo dependency.
+
+The C API has three functions: create an opaque context for a numeric device, run vector addition with host pointers/count/timings/error buffer, and destroy the context. Calls return explicit status codes and NUL-terminated messages; C++ exceptions are caught at the boundary. The Rust wrapper owns destruction with `Drop` and preinitializes output metadata before unsafe calls.
+
+Coordinator review found and corrected two native error-path issues: a context leak if stream creation failed, and immediate returns that could leave asynchronous work touching borrowed Rust slices. Post-enqueue failures now best-effort synchronize before returning the original error.
+
+Verified commands:
+
+```bash
+cargo fmt --check
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo run --release --example cuda_vector_add -- --device 0 --elements 1048576
+cargo run --release --example cuda_vector_add -- --device 0 --elements 16777216
+```
+
+All passed, and every output element was validated exactly. A coordinator-run 16,777,216-element sample on device 0 measured H2D 10.772 ms, kernel 0.726 ms, and D2H 24.918 ms. These are smoke observations, not benchmark results. Device 99 correctly failed with status 1 and reported that only three devices were available. The C symbols were confirmed unmangled in the executable, which dynamically links CUDA runtime 12 and `libstdc++`.
+
+Current limitations are intentional: `sm_86` is hardcoded for the RTX 3060 development target; CUDA runtime and C++ runtime are shared system dependencies; buffers grow exactly to the requested capacity and do not shrink; the context is single-thread-oriented; and this temporary example is not a supported CLI.
 
 ## Candidate first vertical slice after the spike
 
@@ -452,11 +489,17 @@ End-to-end time is secondary. Upload, kernel, and readback must be measured sepa
 
 A detailed sequence of CUDA flagstat, pipelining, benchmark work, `wgpu`, Vulkan, and tuning slices was proposed. The project owner rejected committing to that sequence because early experiments are likely to invalidate assumptions. A full end-to-end CUDA flagstat path was then proposed as the first vertical slice and was also judged too thick: it combined Rust/CUDA linkage, FFI, BGZF, libdeflate, BAI, record coverage, the flagstat kernel, output, and timing.
 
-The approved immediate work is now only the Rust/CUDA vector-add integration spike. The BGZF byte-sum path is a candidate for the first true vertical slice, not an approved task. Possible later slices are recommendations to revisit, not a plan to execute automatically.
+The approved immediate work was reduced to the Rust/CUDA vector-add integration spike. That spike is now complete. The BGZF byte-sum path is a candidate for the first true vertical slice, not an approved task. Possible later slices are recommendations to revisit, not a plan to execute automatically.
 
 ### CUDA packaging choice
 
 Two meanings of “put CUDA in the Rust program” were compared. One is to compile CUDA host code and kernels into a static native archive linked into the final Rust executable, exposing a C ABI; no separate library is shipped. The other is to embed PTX/cubin/fatbin and manage the CUDA Driver API from Rust. The project owner prefers C APIs, so the statically linked C boundary was retained for the integration spike.
+
+### Rust/CUDA spike outcome
+
+The integration spike validated the chosen packaging direction: Rust can own host data and a safe context wrapper while `nvcc`-compiled CUDA host/kernel code is statically included behind a C API. Build invalidation, device selection, transfers, CUDA-event timing, exact result validation, native errors, and RAII destruction all worked on the RTX 3060.
+
+The first implementation passed normal-path tests but coordinator review identified two subtle error-path defects: a partial-construction leak and possible asynchronous access to Rust-borrowed buffers after an error return. Both were corrected before acceptance. This is evidence that later native APIs must be reviewed specifically for partial resource construction and host-buffer lifetimes, not just successful execution.
 
 ### Project naming
 
@@ -495,11 +538,10 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 Do not answer all of these speculatively. Resolve them when the relevant experiment reaches the decision point, asking the project owner when behavior or scope is affected.
 
-1. What is the smallest C API that tests context lifetime, device selection, errors, transfers, launch, and timing without becoming a premature production backend interface?
-2. After the integration spike, is the proposed BGZF per-block byte-sum path the right first vertical slice?
-3. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
-4. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
-5. What fixed default BAM batch size should be used, and should the limit describe compressed input or decompressed upload bytes?
-6. Which timing and synchronization boundaries will remain comparable among CUDA, Vulkan, and `wgpu`?
-7. What exact expected totals should be recorded for `HG002_chr22.bam` after independently validating them?
-8. How much malformed-input validation belongs on the host before GPU dispatch? Valid input is assumed, but GPU out-of-bounds access is never acceptable.
+1. After the integration spike, is the proposed BGZF per-block byte-sum path the right first vertical slice?
+2. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
+3. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
+4. What fixed default BAM batch size should be used, and should the limit describe compressed input or decompressed upload bytes?
+5. Which timing and synchronization boundaries will remain comparable among CUDA, Vulkan, and `wgpu`?
+6. What exact expected totals should be recorded for `HG002_chr22.bam` after independently validating them?
+7. How much malformed-input validation belongs on the host before GPU dispatch? Valid input is assumed, but GPU out-of-bounds access is never acceptable.

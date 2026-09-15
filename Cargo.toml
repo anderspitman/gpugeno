@@ -1,0 +1,5 @@
+[package]
+name = "gpugeno"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-based BAM analysis prototype; currently the temporary Rust/CUDA integration spike"
