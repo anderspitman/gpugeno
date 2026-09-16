@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the CUDA-only whole-file flagstat streaming vertical slice is complete and validated on `HG002_chr22.bam`. No next implementation slice is approved.
+**Current phase:** the CUDA whole-file flagstat vertical slice and source-layout cleanup are complete. The flagstat device code now lives in `cuda/flagstat.cu`, and high-frequency monitoring independently confirmed execution on GPU 0. No next implementation slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,7 +41,7 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-No next implementation task is approved. The completed CUDA path establishes exact whole-file flagstat counters, a bounded indexed batch representation, and the first real kernel timings. The next agent should review the new evidence—especially the dominant sequential batch-build time, the batch-count sensitivity of kernel timing, and the remaining pileup overlap/completion question—and ask the project owner to select one small next experiment.
+No next implementation task is approved. The flagstat kernel is now clearly separated from common CUDA host/context code. If GPU utilization appears absent, distinguish the upload-only example from the real flagstat command and remember that the default 256 MiB run performs only about 0.5 seconds of GPU-stage work amid roughly 7.1 seconds of sequential batch construction.
 
 ## Purpose of this document
 
@@ -116,7 +116,8 @@ The root now contains a bounded streaming Rust/CUDA flagstat prototype:
 - `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
 - `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
 - `src/indexed_batch.rs`: bounded virtual-offset-to-byte translation and disjoint physical batch stream
-- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, reusable CUDA context/buffers, safe bounded flagstat record walk, and temporary vector-add/upload operations
+- `cuda/gpugeno_cuda.h` and `cuda/gpugeno_cuda.cu`: public C ABI, reusable CUDA context/buffers, transfer/timing orchestration, and temporary vector-add/upload support
+- `cuda/flagstat.cuh` and `cuda/flagstat.cu`: internal launch declaration plus the flagstat classifier and bounded CUDA record-walk kernel
 - `examples/cuda_vector_add.rs` and `examples/bam_upload.rs`: temporary regression diagnostics
 - `idea.md`: the original pileup-oriented idea
 - `design.md`: this document
@@ -541,6 +542,22 @@ These are single-run smoke observations on device 0, not stable benchmarks:
 ```
 
 The logical bytes and all counters were identical at both batch sizes. Boundary-member rereads explain compressed bytes exceeding the 1,635,811,603-byte file and increasing with more batches. The dramatic summed kernel-time increase across 339 small launches shows that batch policy is part of meaningful backend comparison even with the same 2,284 spans. Sequential batch construction remains by far the largest measured stage, but parallel decompression and overlap remain intentionally unimplemented.
+
+### CUDA source split and device-activity verification
+
+The misleading monolithic names were removed. `cuda/gpugeno_cuda.cu` now owns the C ABI, context, transfers, timing, and diagnostic vector-add path; the actual flagstat classifier and `flagstat_kernel` are in `cuda/flagstat.cu`, with only an internal launch declaration in `cuda/flagstat.cuh`. `build.rs` compiles both translation units and archives both objects.
+
+Review found a native-build defect during this split: `ar rcs` updates an existing archive but does not remove members whose object names disappeared. The first incremental split build therefore still linked the stale old `vector_add.o`, even though a clean build would not. `build.rs` now removes the old archive before recreating it. `nm -C target/release/gpugeno` then confirmed that the executable contains `gpugeno_launch_flagstat` and a kernel symbol attributed to `flagstat.cu`.
+
+A post-fix 16 MiB run was sampled approximately every 66 ms with:
+
+```bash
+nvidia-smi --id=0 \
+  --query-gpu=utilization.gpu,memory.used \
+  --format=csv,noheader,nounits
+```
+
+During the 9.07-second command, 134 of 138 samples reported nonzero GPU utilization, with a maximum observed 32% and 126 MiB observed device memory. The command again returned 10,633,980 reads and CUDA-event totals of H2D 477.776 ms, kernel 1,118.912 ms, and D2H 7.216 ms. This independently confirms execution on GPU 0. It also explains misleading casual observation: `examples/bam_upload` intentionally launches no kernel, the vector-add example's kernel is sub-millisecond at its small invocation, and the 256 MiB flagstat run submits short GPU bursts separated by CPU decompression.
 
 ### Remaining risks
 

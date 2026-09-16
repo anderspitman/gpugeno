@@ -2,7 +2,8 @@
  *
  * This header must stay strictly C-compatible: no C++ types, no name
  * mangling, and no exceptions may cross this boundary. The implementation
- * (vector_add.cu) is C++ compiled by nvcc, but only the declarations below
+ * (`gpugeno_cuda.cu` plus operation-specific sources) is C++ compiled by
+ * nvcc, but only the declarations below
  * are exposed to Rust.
  *
  * Status codes returned by the entry points:

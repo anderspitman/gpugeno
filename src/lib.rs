@@ -1,6 +1,7 @@
 //! Safe Rust boundary for the statically linked CUDA implementation.
 //!
-//! The native side is `cuda/vector_add.cu`, compiled by `nvcc` (see
+//! The native host side is `cuda/gpugeno_cuda.cu`, and operation-specific
+//! kernels such as flagstat live in their own CUDA sources. They are compiled by `nvcc` (see
 //! `build.rs`) and linked into the executable. It exposes a narrow C ABI;
 //! this crate wraps that ABI so callers never touch `unsafe`.
 
@@ -13,7 +14,7 @@ use bam::FlagstatCounters;
 
 /// Timings reported by a native CUDA vector-add call, in milliseconds.
 ///
-/// Layout matches `struct gpugeno_cuda_timings` in `cuda/vector_add.h`.
+/// Layout matches `struct gpugeno_cuda_timings` in `cuda/gpugeno_cuda.h`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CudaTimings {
@@ -28,7 +29,7 @@ pub struct CudaTimings {
 /// Timing reported by a synchronized raw-byte upload, in milliseconds.
 ///
 /// Layout matches `struct gpugeno_cuda_upload_timings` in
-/// `cuda/vector_add.h`.
+/// `cuda/gpugeno_cuda.h`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CudaUploadTimings {
@@ -260,7 +261,7 @@ fn c_message(buffer: &[u8]) -> String {
 }
 
 mod ffi {
-    //! Raw C ABI declarations for `cuda/vector_add.h`. Keep in sync with that
+    //! Raw C ABI declarations for `cuda/gpugeno_cuda.h`. Keep in sync with that
     //! header: signatures, status codes, and the timings layout.
 
     use super::{CudaTimings, CudaUploadTimings};
