@@ -1,8 +1,10 @@
-//! Safe Rust boundary for the statically linked CUDA vector-add spike.
+//! Safe Rust boundary for the statically linked CUDA integration spike.
 //!
 //! The native side is `cuda/vector_add.cu`, compiled by `nvcc` (see
 //! `build.rs`) and linked into the executable. It exposes a narrow C ABI;
 //! this crate wraps that ABI so callers never touch `unsafe`.
+
+pub mod bgzf;
 
 /// Timings reported by a native CUDA vector-add call, in milliseconds.
 ///
@@ -16,6 +18,17 @@ pub struct CudaTimings {
     pub kernel_ms: f32,
     /// Device-to-host readback of the result.
     pub d2h_ms: f32,
+}
+
+/// Timing reported by a synchronized raw-byte upload, in milliseconds.
+///
+/// Layout matches `struct gpugeno_cuda_upload_timings` in
+/// `cuda/vector_add.h`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CudaUploadTimings {
+    /// Host-to-device copy measured with CUDA events.
+    pub h2d_ms: f32,
 }
 
 /// An error reported by the native CUDA boundary.
@@ -132,6 +145,39 @@ impl CudaContext {
         }
         Ok(timings)
     }
+
+    /// Uploads a nonempty byte slice into the context's reusable raw device
+    /// buffer.
+    ///
+    /// The native side synchronizes its stream before returning, so CUDA no
+    /// longer references `data` when this method completes.
+    pub fn upload(&self, data: &[u8]) -> Result<CudaUploadTimings, CudaError> {
+        if data.is_empty() {
+            return Err(CudaError::InvalidArgument(
+                "upload data must not be empty".to_string(),
+            ));
+        }
+
+        let mut timings = CudaUploadTimings::default();
+        let mut error_message = [0u8; 1024];
+        let status = unsafe {
+            ffi::gpugeno_cuda_upload(
+                self.raw,
+                data.as_ptr(),
+                data.len(),
+                &mut timings,
+                error_message.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                error_message.len(),
+            )
+        };
+        if status != 0 {
+            return Err(CudaError::Native {
+                code: status,
+                message: c_message(&error_message),
+            });
+        }
+        Ok(timings)
+    }
 }
 
 impl Drop for CudaContext {
@@ -153,7 +199,7 @@ mod ffi {
     //! Raw C ABI declarations for `cuda/vector_add.h`. Keep in sync with that
     //! header: signatures, status codes, and the timings layout.
 
-    use super::CudaTimings;
+    use super::{CudaTimings, CudaUploadTimings};
     use std::os::raw::{c_char, c_int, c_void};
 
     extern "C" {
@@ -171,6 +217,15 @@ mod ffi {
             output: *mut f32,
             element_count: usize,
             out_timings: *mut CudaTimings,
+            error_message: *mut c_char,
+            error_capacity: usize,
+        ) -> c_int;
+
+        pub(crate) fn gpugeno_cuda_upload(
+            context: *mut c_void,
+            data: *const u8,
+            byte_count: usize,
+            out_timings: *mut CudaUploadTimings,
             error_message: *mut c_char,
             error_capacity: usize,
         ) -> c_int;

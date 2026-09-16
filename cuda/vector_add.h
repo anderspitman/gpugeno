@@ -27,8 +27,9 @@ extern "C" {
 #endif
 
 /* Opaque native context: one selected CUDA device, one stream, three timing
- * event pairs, and reusable device buffers. Created with
- * gpugeno_cuda_create and released with gpugeno_cuda_destroy. */
+ * event pairs, reusable vector-add device buffers, and one reusable raw-byte
+ * device buffer. Created with gpugeno_cuda_create and released with
+ * gpugeno_cuda_destroy. */
 struct gpugeno_cuda_context;
 
 /* Per-stage timings measured with CUDA events on the context stream, in
@@ -40,6 +41,11 @@ struct gpugeno_cuda_timings {
     float kernel_ms;
     /* Device-to-host readback. */
     float d2h_ms;
+};
+
+/* Raw-byte upload timing measured with the context's H2D event pair. */
+struct gpugeno_cuda_upload_timings {
+    float h2d_ms;
 };
 
 /* Selects `device` and creates a context. Returns 0 on success and stores
@@ -62,6 +68,18 @@ int gpugeno_cuda_vector_add(
     float *output,
     size_t element_count,
     struct gpugeno_cuda_timings *out_timings,
+    char *error_message,
+    size_t error_capacity);
+
+/* Uploads byte_count raw bytes into a context-owned reusable device buffer.
+ * The H2D copy is timed with CUDA events on the existing stream. The stream
+ * is synchronized before success is returned, so data is no longer borrowed
+ * by CUDA on return. Null pointers and zero byte_count are rejected. */
+int gpugeno_cuda_upload(
+    struct gpugeno_cuda_context *context,
+    const unsigned char *data,
+    size_t byte_count,
+    struct gpugeno_cuda_upload_timings *out_timings,
     char *error_message,
     size_t error_capacity);
 

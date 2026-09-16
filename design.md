@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the Rust/CUDA vector-add integration spike is complete; the first true vertical slice—a bounded BGZF/libdeflate batch uploaded to CUDA—has been approved but not implemented.
+**Current phase:** the Rust/CUDA spike and the bounded BGZF/libdeflate-to-CUDA upload slice are complete and coordinator-reviewed; no next slice is approved.
 
 ## Fresh-agent handoff
 
@@ -9,13 +9,13 @@ If a new coding agent is told only to read this document and continue, it should
 
 1. Treat this document as the project memory and source of current product intent.
 2. Verify the repository and toolchain state, because those observations may have changed since the last update.
-3. Work only on the **Approved first vertical slice** below. Do not add GPU compute, whole-file streaming, BAI, BAM record parsing, or later backends.
+3. Do not start another implementation slice without project-owner approval. Review the completed bounded-upload results and select the next smallest experiment.
 4. Put new `gpugeno` application code at the project root. Treat `cubayes/` and `libshadowfax/` as read-only reference repositories unless the project owner explicitly decides otherwise.
-5. Prefer the smallest experiment that proves real BGZF data can be decompressed through libdeflate in Rust and uploaded through the existing CUDA C boundary.
+5. Prefer the smallest experiment that answers one uncertainty; do not pre-design later pipeline stages.
 6. Investigate implementation details independently when they do not change product behavior. If a consequential choice or contradiction remains, ask the project owner one focused question at a time.
-7. After the experiment, update this document with the exact implementation, commands, measurements, and discoveries before proposing further work.
+7. After an approved experiment, update this document with the exact implementation, commands, measurements, and discoveries before proposing further work.
 
-The immediate task is the bounded BAM-prefix upload slice documented below.
+The leading next candidate is GPU-side per-block byte sums, but it is not approved.
 
 ## Purpose of this document
 
@@ -84,9 +84,11 @@ The root now contains a minimal Rust crate and temporary CUDA spike:
 
 - `Cargo.toml` and `Cargo.lock`
 - `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
-- `src/lib.rs`: safe Rust owner around the opaque CUDA C context
-- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, CUDA host wrapper, and vector-add kernel
-- `examples/cuda_vector_add.rs`: temporary executable harness
+- `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including vector-add and raw-byte upload operations
+- `src/bgzf.rs`: bounded incremental BGZF framing and sequential libdeflate decompression
+- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, CUDA context/upload logic, and temporary vector-add kernel
+- `examples/cuda_vector_add.rs`: temporary CUDA integration harness
+- `examples/bam_upload.rs`: temporary bounded BAM-prefix decompression/upload harness
 - `idea.md`: the original pileup-oriented idea
 - `design.md`: this document
 - `cubayes/`: a clean CuBayes reference clone
@@ -142,7 +144,7 @@ The development environment may require the full CUDA and Vulkan development too
 - [x] Review the spike, correct error-path resource/lifetime issues, and record what it proved.
 - [x] Commit the reviewed spike and project metadata.
 - [x] Decide the first true vertical slice: decompress one bounded BGZF batch with libdeflate in Rust and upload it to CUDA.
-- [ ] Implement and review that bounded BGZF upload slice.
+- [x] Implement and review the bounded BGZF upload slice.
 - [ ] Decide the next experiment from its results.
 - [ ] Eventually complete an end-to-end CUDA flagstat run and validate `HG002_chr22.bam`.
 
@@ -299,9 +301,9 @@ All passed, and every output element was validated exactly. A coordinator-run 16
 
 Current limitations are intentional: `sm_86` is hardcoded for the RTX 3060 development target; CUDA runtime and C++ runtime are shared system dependencies; buffers grow exactly to the requested capacity and do not shrink; the context is single-thread-oriented; and this temporary example is not a supported CLI.
 
-## Approved first vertical slice: bounded BGZF decompression and CUDA upload
+## Completed first vertical slice: bounded BGZF decompression and CUDA upload
 
-This is the only approved new implementation work.
+This was the first real-data path through Rust, libdeflate, and CUDA.
 
 ### Goal
 
@@ -339,6 +341,35 @@ BAM file prefix
 - No Vulkan, `wgpu`, pileup, or flagstat
 
 The operation proves successful CUDA submission and synchronization, not byte identity on the device; content verification through GPU compute is deliberately deferred.
+
+### Implemented result
+
+`libdeflater` 1.26.0 is now the only Rust runtime dependency. `read_bgzf_prefix` incrementally reads complete members from the file start, validates gzip/BGZF framing (`FEXTRA`, `BC`, `BSIZE`, optional-header bounds, trailer and `ISIZE`), reuses one `Decompressor`, and passes each full member to `gzip_decompress` so libdeflate verifies gzip integrity and CRC. Members are concatenated in order only when their complete uncompressed output fits the configured cap. Determining whether the next member fits requires reading that compressed member to inspect its trailer; an excluded member is neither counted nor decompressed.
+
+The CUDA context now owns a reusable raw-byte device buffer in addition to the vector-add buffers. The new C upload operation reuses the existing stream and H2D event pair, synchronizes before returning, and preserves the established status/error-buffer and post-enqueue lifetime rules. Rust exposes it as `CudaContext::upload(&[u8])`. No device pointer is exposed and no GPU compute or readback occurs.
+
+The temporary command is:
+
+```bash
+cargo run --release --example bam_upload -- INPUT.bam \
+  --device 0 --max-uncompressed-bytes 268435456
+```
+
+Seven self-contained tests cover ordered concatenation, cap boundaries, first-member rejection, a 65,536-byte output member, missing `BC`, truncation, and canonical EOF handling. Coordinator verification passed `cargo fmt --check`, `cargo test`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and the vector-add regression.
+
+Coordinator-observed real-data results on device 0:
+
+```text
+4 MiB cap:
+  blocks=64 compressed_bytes=1,216,766 uncompressed_bytes=4,162,185
+  batch_build=6.353 ms libdeflate=4.695 ms CUDA_H2D=0.470 ms
+
+256 MiB cap:
+  blocks=4,128 compressed_bytes=81,511,192 uncompressed_bytes=268,435,257
+  batch_build=401.879 ms libdeflate=314.678 ms CUDA_H2D=21.024 ms
+```
+
+These are smoke observations, not stable benchmarks. The uploaded source is an ordinary pageable Rust `Vec<u8>`; pinned-memory optimization was intentionally deferred. The exact canonical 28-byte BAM EOF marker terminates input and is excluded from counts. A malformed five-byte gzip prefix failed cleanly with compressed-offset context.
 
 ## Later candidate: GPU per-block byte sums
 
@@ -546,6 +577,12 @@ The first implementation passed normal-path tests but coordinator review identif
 
 After the CUDA integration spike, the project owner deliberately split the proposed BGZF-plus-GPU-checksum experiment again. The approved slice stops after sequential Rust/libdeflate decompression of one bounded BAM prefix and a synchronized CUDA upload. GPU compute and readback are deferred so BGZF/libdeflate integration and the upload boundary can be evaluated independently.
 
+### Bounded BGZF upload outcome
+
+The first vertical slice confirmed that a real BAM prefix can be incrementally framed, decompressed through one reused Rust/libdeflate object, concatenated under an uncompressed-byte cap, and uploaded through the existing CUDA C boundary. The 256 MiB experiment completed successfully without BAI or BAM semantic parsing.
+
+One practical observation is that H2D from pageable Rust memory was about 21 ms for roughly 256 MiB, while summed libdeflate calls were about 315 ms. These single-run numbers do not establish a bottleneck, but they provide a baseline for deciding whether the next experiment should add GPU content verification, parallel decompression, or pinned memory.
+
 ### Project naming
 
 The prototype was initially called `sfxproto`. Before application code was created, it was renamed to **`gpugeno`**. The existing checkout paths containing `shadowfax` and the `libshadowfax` reference repository retain their names; they are not the application name.
@@ -583,7 +620,7 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 Do not answer all of these speculatively. Resolve them when the relevant experiment reaches the decision point, asking the project owner when behavior or scope is affected.
 
-1. After the bounded upload slice, should the next experiment add GPU per-block byte sums and readback verification?
+1. Should the next experiment add GPU per-block byte sums and readback verification, parallel libdeflate workers, or pinned host memory?
 2. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
 3. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
 4. What fixed default BAM batch size should the later streaming pipeline use?

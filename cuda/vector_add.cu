@@ -17,8 +17,9 @@
 #include <new>
 
 // Complete definition of the opaque context declared in vector_add.h. It
-// owns one stream, three timing event pairs, and reusable device buffers.
-// It must stay at global scope so the extern "C" signatures match the header.
+// owns one stream, three timing event pairs, reusable vector-add buffers, and
+// a reusable raw-byte upload buffer. It must stay at global scope so the
+// extern "C" signatures match the header.
 struct gpugeno_cuda_context {
     int device = -1;
     cudaStream_t stream = nullptr;
@@ -32,6 +33,8 @@ struct gpugeno_cuda_context {
     float *device_b = nullptr;
     float *device_output = nullptr;
     std::size_t capacity_elements = 0;
+    unsigned char *device_bytes = nullptr;
+    std::size_t capacity_bytes = 0;
 };
 
 namespace {
@@ -310,6 +313,69 @@ int vector_add_impl(struct gpugeno_cuda_context *context, const float *a, const 
     return kStatusOk;
 }
 
+int upload_impl(struct gpugeno_cuda_context *context, const unsigned char *data,
+                std::size_t byte_count, struct gpugeno_cuda_upload_timings *out_timings,
+                char *error_message, std::size_t error_capacity) {
+    if (error_message != nullptr && error_capacity != 0) {
+        error_message[0] = '\0';
+    }
+    if (context == nullptr || data == nullptr || out_timings == nullptr) {
+        return report_plain(kStatusInvalidArgument, "a required pointer is null", error_message,
+                            error_capacity);
+    }
+    if (byte_count == 0) {
+        return report_plain(kStatusInvalidArgument, "byte_count must be greater than zero",
+                            error_message, error_capacity);
+    }
+
+    GPUGENO_CUDA_CHECK("cudaSetDevice", kStatusCudaError, cudaSetDevice(context->device));
+
+    if (byte_count > context->capacity_bytes) {
+        // Preserve the old allocation until its replacement has succeeded.
+        unsigned char *next_bytes = nullptr;
+        const cudaError_t allocation = cudaMalloc(&next_bytes, byte_count);
+        if (allocation != cudaSuccess) {
+            return report_cuda_failure("cudaMalloc (raw byte buffer)", allocation,
+                                       kStatusOutOfMemory, error_message, error_capacity);
+        }
+        const cudaError_t release = cudaFree(context->device_bytes);
+        if (release != cudaSuccess) {
+            cudaFree(next_bytes);
+            return report_cuda_failure("cudaFree (old raw byte buffer)", release,
+                                       kStatusCudaError, error_message, error_capacity);
+        }
+        context->device_bytes = next_bytes;
+        context->capacity_bytes = byte_count;
+    }
+
+    GPUGENO_CUDA_CHECK("cudaEventRecord (upload start)", kStatusCudaError,
+                       cudaEventRecord(context->h2d_start, context->stream));
+    const cudaError_t transfer = cudaMemcpyAsync(context->device_bytes, data, byte_count,
+                                                  cudaMemcpyHostToDevice, context->stream);
+    if (transfer != cudaSuccess) {
+        return report_failure_after_enqueue(context, "cudaMemcpyAsync (raw H2D)", transfer,
+                                            kStatusCudaError, error_message, error_capacity);
+    }
+    GPUGENO_CUDA_CHECK_AFTER_ENQUEUE("cudaEventRecord (upload end)", kStatusCudaError,
+                                     cudaEventRecord(context->h2d_end, context->stream));
+
+    // Synchronize before success so CUDA cannot retain a reference to the
+    // borrowed Rust slice. On failure, make one more best-effort drain while
+    // preserving the useful error from the original synchronization call.
+    const cudaError_t synchronization = cudaStreamSynchronize(context->stream);
+    if (synchronization != cudaSuccess) {
+        return report_failure_after_enqueue(context, "cudaStreamSynchronize (raw upload)",
+                                            synchronization, kStatusCudaError, error_message,
+                                            error_capacity);
+    }
+
+    float h2d_ms = 0.0f;
+    GPUGENO_CUDA_CHECK("cudaEventElapsedTime (raw H2D)", kStatusCudaError,
+                       cudaEventElapsedTime(&h2d_ms, context->h2d_start, context->h2d_end));
+    out_timings->h2d_ms = h2d_ms;
+    return kStatusOk;
+}
+
 void destroy_context(struct gpugeno_cuda_context *context) {
     if (context == nullptr) {
         return;
@@ -327,6 +393,7 @@ void destroy_context(struct gpugeno_cuda_context *context) {
     cudaFree(context->device_a);
     cudaFree(context->device_b);
     cudaFree(context->device_output);
+    cudaFree(context->device_bytes);
     cudaStreamDestroy(context->stream);
     delete context;
 }
@@ -358,6 +425,30 @@ extern "C" int gpugeno_cuda_vector_add(struct gpugeno_cuda_context *context, con
         write_error(error_message, error_capacity, kStatusUnexpectedException, exception.what());
         return kStatusUnexpectedException;
     } catch (...) {
+        write_error(error_message, error_capacity, kStatusUnexpectedException,
+                    "unexpected C++ exception");
+        return kStatusUnexpectedException;
+    }
+}
+
+extern "C" int gpugeno_cuda_upload(struct gpugeno_cuda_context *context,
+                                   const unsigned char *data, std::size_t byte_count,
+                                   struct gpugeno_cuda_upload_timings *out_timings,
+                                   char *error_message, std::size_t error_capacity) {
+    try {
+        return upload_impl(context, data, byte_count, out_timings, error_message, error_capacity);
+    } catch (const std::exception &exception) {
+        // Defensively drain if an unexpected exception ever occurs after the
+        // H2D submission; no borrowed Rust memory may outlive this call.
+        if (context != nullptr) {
+            cudaStreamSynchronize(context->stream);
+        }
+        write_error(error_message, error_capacity, kStatusUnexpectedException, exception.what());
+        return kStatusUnexpectedException;
+    } catch (...) {
+        if (context != nullptr) {
+            cudaStreamSynchronize(context->stream);
+        }
         write_error(error_message, error_capacity, kStatusUnexpectedException,
                     "unexpected C++ exception");
         return kStatusUnexpectedException;
