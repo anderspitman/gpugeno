@@ -5,7 +5,7 @@
 
 use libdeflater::Decompressor;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -46,13 +46,13 @@ pub struct BgzfError {
 }
 
 impl BgzfError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
     }
 
-    fn at(path: &Path, offset: u64, message: impl std::fmt::Display) -> Self {
+    pub(crate) fn at(path: &Path, offset: u64, message: impl std::fmt::Display) -> Self {
         Self::new(format!(
             "{} at compressed offset {offset}: {message}",
             path.display()
@@ -67,6 +67,124 @@ impl std::fmt::Display for BgzfError {
 }
 
 impl std::error::Error for BgzfError {}
+
+/// A BAM virtual offset: the compressed BGZF member offset in the high 48
+/// bits and an offset into that member's decompressed output in the low 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VirtualOffset(u64);
+
+impl VirtualOffset {
+    pub fn new(compressed: u64, uncompressed: u16) -> Result<Self, BgzfError> {
+        if compressed > (u64::MAX >> 16) {
+            return Err(BgzfError::new(format!(
+                "compressed offset {compressed} does not fit a BAM virtual offset"
+            )));
+        }
+        Ok(Self((compressed << 16) | u64::from(uncompressed)))
+    }
+
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub fn compressed(self) -> u64 {
+        self.0 >> 16
+    }
+
+    pub fn uncompressed(self) -> u16 {
+        self.0 as u16
+    }
+}
+
+/// One fully framed and decompressed BGZF member. BAM metadata parsing and
+/// indexed batch construction use this to share framing and integrity checks.
+pub(crate) struct BgzfBlock {
+    pub compressed_offset: u64,
+    pub compressed_len: usize,
+    pub data: Vec<u8>,
+    pub is_eof: bool,
+}
+
+/// Opens and decompresses one member at `compressed_offset` with a caller-
+/// owned libdeflate object that can be reused for an entire stream.
+pub(crate) fn read_block_at(
+    file: &mut File,
+    decompressor: &mut Decompressor,
+    path: &Path,
+    compressed_offset: u64,
+) -> Result<Option<BgzfBlock>, BgzfError> {
+    file.seek(SeekFrom::Start(compressed_offset))
+        .map_err(|error| {
+            BgzfError::at(
+                path,
+                compressed_offset,
+                format!("failed to seek to BGZF member: {error}"),
+            )
+        })?;
+    let Some(member) = read_member(file, path, compressed_offset)? else {
+        return Ok(None);
+    };
+    let is_eof = member.bytes == BGZF_EOF;
+    let mut data = vec![0u8; member.uncompressed_len];
+    let written = decompressor
+        .gzip_decompress(&member.bytes, &mut data)
+        .map_err(|error| {
+            BgzfError::at(
+                path,
+                compressed_offset,
+                format!("libdeflate gzip decompression failed: {error}"),
+            )
+        })?;
+    if written != member.uncompressed_len {
+        return Err(BgzfError::at(
+            path,
+            compressed_offset,
+            format!(
+                "libdeflate returned {written} bytes but the gzip trailer ISIZE is {}",
+                member.uncompressed_len
+            ),
+        ));
+    }
+    Ok(Some(BgzfBlock {
+        compressed_offset,
+        compressed_len: member.bytes.len(),
+        data,
+        is_eof,
+    }))
+}
+
+/// Returns the physical endpoint of BAM data as a virtual offset. A canonical
+/// terminal BGZF marker is excluded; otherwise physical EOF is used.
+pub fn data_end_virtual_offset(path: &Path) -> Result<VirtualOffset, BgzfError> {
+    let mut file = File::open(path)
+        .map_err(|error| BgzfError::new(format!("failed to open {}: {error}", path.display())))?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| BgzfError::new(format!("failed to stat {}: {error}", path.display())))?
+        .len();
+    let mut endpoint = file_len;
+    if file_len >= BGZF_EOF.len() as u64 {
+        file.seek(SeekFrom::End(-(BGZF_EOF.len() as i64)))
+            .map_err(|error| {
+                BgzfError::new(format!("failed to seek {}: {error}", path.display()))
+            })?;
+        let mut tail = [0u8; BGZF_EOF.len()];
+        file.read_exact(&mut tail).map_err(|error| {
+            BgzfError::new(format!(
+                "failed to read the end of {}: {error}",
+                path.display()
+            ))
+        })?;
+        if tail == BGZF_EOF {
+            endpoint -= BGZF_EOF.len() as u64;
+        }
+    }
+    VirtualOffset::new(endpoint, 0)
+}
 
 /// Reads and decompresses complete BGZF members from the start of `path`.
 ///

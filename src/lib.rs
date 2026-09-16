@@ -1,10 +1,15 @@
-//! Safe Rust boundary for the statically linked CUDA integration spike.
+//! Safe Rust boundary for the statically linked CUDA implementation.
 //!
 //! The native side is `cuda/vector_add.cu`, compiled by `nvcc` (see
 //! `build.rs`) and linked into the executable. It exposes a narrow C ABI;
 //! this crate wraps that ABI so callers never touch `unsafe`.
 
+pub mod bai;
+pub mod bam;
 pub mod bgzf;
+pub mod indexed_batch;
+
+use bam::FlagstatCounters;
 
 /// Timings reported by a native CUDA vector-add call, in milliseconds.
 ///
@@ -29,6 +34,12 @@ pub struct CudaTimings {
 pub struct CudaUploadTimings {
     /// Host-to-device copy measured with CUDA events.
     pub h2d_ms: f32,
+}
+
+#[derive(Debug)]
+pub struct CudaFlagstatBatch {
+    pub span_counts: Vec<FlagstatCounters>,
+    pub timings: CudaTimings,
 }
 
 /// An error reported by the native CUDA boundary.
@@ -178,6 +189,59 @@ impl CudaContext {
         }
         Ok(timings)
     }
+
+    /// Classifies one bounded decompressed BAM batch. Every offset starts a
+    /// disjoint record span; the final span ends at `data.len()`.
+    pub fn flagstat(
+        &self,
+        data: &[u8],
+        span_starts: &[u32],
+    ) -> Result<CudaFlagstatBatch, CudaError> {
+        if data.is_empty() || data.len() > u32::MAX as usize {
+            return Err(CudaError::InvalidArgument(
+                "flagstat data must fit a nonempty u32 byte range".to_string(),
+            ));
+        }
+        if span_starts.is_empty()
+            || span_starts[0] != 0
+            || span_starts.windows(2).any(|pair| pair[0] >= pair[1])
+            || usize::try_from(*span_starts.last().unwrap()).unwrap() >= data.len()
+        {
+            return Err(CudaError::InvalidArgument(
+                "flagstat span starts must begin at zero, increase strictly, and lie within data"
+                    .to_string(),
+            ));
+        }
+
+        let mut span_counts = vec![FlagstatCounters::default(); span_starts.len()];
+        let mut statuses = vec![0u8; span_starts.len()];
+        let mut timings = CudaTimings::default();
+        let mut error_message = [0u8; 1024];
+        let status = unsafe {
+            ffi::gpugeno_cuda_flagstat(
+                self.raw,
+                data.as_ptr(),
+                data.len(),
+                span_starts.as_ptr(),
+                span_starts.len(),
+                span_counts.as_mut_ptr(),
+                statuses.as_mut_ptr(),
+                &mut timings,
+                error_message.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                error_message.len(),
+            )
+        };
+        if status != 0 {
+            return Err(CudaError::Native {
+                code: status,
+                message: c_message(&error_message),
+            });
+        }
+        Ok(CudaFlagstatBatch {
+            span_counts,
+            timings,
+        })
+    }
 }
 
 impl Drop for CudaContext {
@@ -200,6 +264,7 @@ mod ffi {
     //! header: signatures, status codes, and the timings layout.
 
     use super::{CudaTimings, CudaUploadTimings};
+    use crate::bam::FlagstatCounters;
     use std::os::raw::{c_char, c_int, c_void};
 
     extern "C" {
@@ -226,6 +291,19 @@ mod ffi {
             data: *const u8,
             byte_count: usize,
             out_timings: *mut CudaUploadTimings,
+            error_message: *mut c_char,
+            error_capacity: usize,
+        ) -> c_int;
+
+        pub(crate) fn gpugeno_cuda_flagstat(
+            context: *mut c_void,
+            data: *const u8,
+            byte_count: usize,
+            span_starts: *const u32,
+            span_count: usize,
+            out_counts: *mut FlagstatCounters,
+            out_status: *mut u8,
+            out_timings: *mut CudaTimings,
             error_message: *mut c_char,
             error_capacity: usize,
         ) -> c_int;

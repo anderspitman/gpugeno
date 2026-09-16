@@ -1,4 +1,4 @@
-/* C ABI for the gpugeno CUDA vector-add integration spike.
+/* C ABI for the gpugeno CUDA implementation.
  *
  * This header must stay strictly C-compatible: no C++ types, no name
  * mangling, and no exceptions may cross this boundary. The implementation
@@ -21,15 +21,16 @@
 #define GPUGENO_CUDA_VECTOR_ADD_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Opaque native context: one selected CUDA device, one stream, three timing
- * event pairs, reusable vector-add device buffers, and one reusable raw-byte
- * device buffer. Created with gpugeno_cuda_create and released with
- * gpugeno_cuda_destroy. */
+ * event pairs, reusable vector-add device buffers, and reusable raw-byte,
+ * span-offset, flagstat-result, and status buffers. Created with
+ * gpugeno_cuda_create and released with gpugeno_cuda_destroy. */
 struct gpugeno_cuda_context;
 
 /* Per-stage timings measured with CUDA events on the context stream, in
@@ -46,6 +47,26 @@ struct gpugeno_cuda_timings {
 /* Raw-byte upload timing measured with the context's H2D event pair. */
 struct gpugeno_cuda_upload_timings {
     float h2d_ms;
+};
+
+/* Flagstat counters. Each two-element field is [QC-passed, QC-failed]. */
+struct gpugeno_flagstat_counts {
+    uint64_t n_reads[2];
+    uint64_t n_mapped[2];
+    uint64_t n_pair_all[2];
+    uint64_t n_pair_map[2];
+    uint64_t n_pair_good[2];
+    uint64_t n_sgltn[2];
+    uint64_t n_read1[2];
+    uint64_t n_read2[2];
+    uint64_t n_dup[2];
+    uint64_t n_diffchr[2];
+    uint64_t n_diffhigh[2];
+    uint64_t n_secondary[2];
+    uint64_t n_supp[2];
+    uint64_t n_primary[2];
+    uint64_t n_pmapped[2];
+    uint64_t n_pdup[2];
 };
 
 /* Selects `device` and creates a context. Returns 0 on success and stores
@@ -80,6 +101,22 @@ int gpugeno_cuda_upload(
     const unsigned char *data,
     size_t byte_count,
     struct gpugeno_cuda_upload_timings *out_timings,
+    char *error_message,
+    size_t error_capacity);
+
+/* Classifies record-aligned spans in one decompressed BAM batch. span_starts
+ * contains span_count strictly increasing uint32 offsets; the final span ends
+ * at byte_count. One result and status byte are copied back per span. Status
+ * zero means success. The stream is synchronized before return. */
+int gpugeno_cuda_flagstat(
+    struct gpugeno_cuda_context *context,
+    const unsigned char *data,
+    size_t byte_count,
+    const uint32_t *span_starts,
+    size_t span_count,
+    struct gpugeno_flagstat_counts *out_counts,
+    unsigned char *out_status,
+    struct gpugeno_cuda_timings *out_timings,
     char *error_message,
     size_t error_capacity);
 

@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the Rust/CUDA spike and bounded BGZF/libdeflate-to-CUDA upload slice are complete and committed. The working tree is clean, and no next implementation slice is approved.
+**Current phase:** the CUDA-only whole-file flagstat streaming vertical slice is complete and validated on `HG002_chr22.bam`. No next implementation slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,7 +41,7 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-No implementation task is approved. The next agent should review the completed bounded-upload evidence and ask the project owner which single next uncertainty to test. Candidate experiments—not commitments—are listed under **Immediate unresolved questions**.
+No next implementation task is approved. The completed CUDA path establishes exact whole-file flagstat counters, a bounded indexed batch representation, and the first real kernel timings. The next agent should review the new evidence—especially the dominant sequential batch-build time, the batch-count sensitivity of kernel timing, and the remaining pileup overlap/completion question—and ask the project owner to select one small next experiment.
 
 ## Purpose of this document
 
@@ -106,22 +106,25 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 
 ### Repository
 
-The root now contains a minimal Rust/CUDA BAM prototype:
+The root now contains a bounded streaming Rust/CUDA flagstat prototype:
 
 - `Cargo.toml` and `Cargo.lock`
 - `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
-- `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including vector-add and raw-byte upload operations
-- `src/bgzf.rs`: bounded incremental BGZF framing and sequential libdeflate decompression
-- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, CUDA context/upload logic, and temporary vector-add kernel
-- `examples/cuda_vector_add.rs`: temporary CUDA integration harness
-- `examples/bam_upload.rs`: temporary bounded BAM-prefix decompression/upload harness
+- `src/main.rs`: CUDA-only `gpugeno flagstat` CLI and whole-file orchestration
+- `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
+- `src/bgzf.rs`: validated BGZF framing, sequential libdeflate decompression, virtual offsets, and the earlier prefix diagnostic
+- `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
+- `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
+- `src/indexed_batch.rs`: bounded virtual-offset-to-byte translation and disjoint physical batch stream
+- `cuda/vector_add.h` and `cuda/vector_add.cu`: C ABI, reusable CUDA context/buffers, safe bounded flagstat record walk, and temporary vector-add/upload operations
+- `examples/cuda_vector_add.rs` and `examples/bam_upload.rs`: temporary regression diagnostics
 - `idea.md`: the original pileup-oriented idea
 - `design.md`: this document
 - `cubayes/`: a clean CuBayes reference clone
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked; the latest completed implementation checkpoint is commit `708be5e` (`Add bounded BGZF CUDA upload slice`). `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The completed flagstat slice is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -176,10 +179,16 @@ cargo run --release --example cuda_vector_add -- \
 
 cargo run --release --example bam_upload -- \
   /agents/shadowfax/data/HG002_chr22.bam \
-  --device 0 --max-uncompressed-bytes 268435456
+  --device 0 --max-uncompressed-bytes 4194304
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 \
+  --max-uncompressed-bytes 268435456 \
+  --benchmark --validate
 ```
 
-All commands passed at the current checkpoint. The examples are temporary diagnostics, not the intended final CLI.
+All commands passed at the current checkpoint. `gpugeno flagstat` is the first functional CLI path; the examples remain temporary diagnostics.
 
 ### Progress
 
@@ -193,8 +202,10 @@ All commands passed at the current checkpoint. The examples are temporary diagno
 - [x] Commit the reviewed spike and project metadata.
 - [x] Decide the first true vertical slice: decompress one bounded BGZF batch with libdeflate in Rust and upload it to CUDA.
 - [x] Implement and review the bounded BGZF upload slice.
-- [ ] Decide the next experiment from its results.
-- [ ] Eventually complete an end-to-end CUDA flagstat run and validate `HG002_chr22.bam`.
+- [x] Decide the next experiment from its results: a CUDA-only whole-file flagstat streaming vertical slice.
+- [x] Implement the reusable indexed bounded-batch layer and CUDA flagstat path.
+- [x] Validate exact counters on `HG002_chr22.bam` against an independent host classifier.
+- [ ] Select the next experiment from the completed flagstat evidence.
 
 ## Current decisions
 
@@ -215,7 +226,19 @@ All commands passed at the current checkpoint. The examples are temporary diagno
 - **Decided:** Use libdeflate on CPU workers rather than implementing GPU BGZF decompression.
 - **Decided:** Use record-aligned BAI virtual offsets to expose many independent GPU work spans. Do not begin with a CPU-generated offset for every BAM record.
 - **Working decision:** All GPU backends should receive deterministic, identical outer batches and spans. A backend may subdivide them internally.
-- **Decided:** Use a fixed default batch size and expose a batch-size argument. The actual default has not been selected.
+- **Decided:** Use a fixed 256 MiB default uncompressed batch cap and expose `--max-uncompressed-bytes`.
+
+### Completed CUDA flagstat vertical slice
+
+- **Decided:** Process the complete representative BAM through bounded streaming batches; this is not another prefix-only experiment.
+- **Decided:** Deliver a CUDA-only `gpugeno flagstat` path with samtools-style output and separate H2D, kernel, and D2H measurements when benchmarking is requested.
+- **Decided:** Take architectural inspiration from both current CuBayes pileup and libshadowfax flagstat, but do not copy their known skip/final-batch defects or unsafe assumptions.
+- **Decided:** Preserve BAI linear entries as coordinate-bearing work items in a reusable shared representation. Flagstat may derive sorted, deduplicated physical anchors to count each BAM record exactly once. Future pileup must be able to retain repeated offsets and genomic windows because overlap semantics differ.
+- **Decided:** Separate metadata/work planning, bounded BGZF decompression plus virtual-to-batch offset translation, backend execution, and result reduction. Keep only bounded batch data resident so worker pools, double buffering, or stage overlap can be added without replacing the operation contract.
+- **Decided:** Add explicit first-record and physical-end coverage for header-adjacent and trailing/unindexed records. Never silently skip zero-length, oversized, or final spans. The first implementation may clearly reject an anchor gap that cannot fit the configured batch.
+- **Decided:** Use the safer bounded record-walk ideas in newer CuBayes pileup code where useful rather than requiring a literal copy of libshadowfax's duplicate `nth_read` traversal.
+- **Decided:** Validate the real CUDA totals against a small independent Rust classifier used as an oracle, not exposed as a public CPU backend.
+- **Explicit non-goals:** parallel libdeflate workers, pinned memory, pipeline overlap, Vulkan, `wgpu`, multi-GPU, CSI/SAM/CRAM, pileup itself, and performance tuning beyond stage timings.
 
 ### Completed first vertical slice boundaries
 
@@ -247,7 +270,7 @@ Current option decisions:
 
 - `--backend cuda|vulkan|wgpu`; target default is `wgpu` once that backend exists.
 - `--device`; one selected GPU per invocation, initially defaulting to device 0.
-- A batch-size override; spelling and units remain to be finalized.
+- `--max-uncompressed-bytes`; the current CUDA path defaults to 256 MiB.
 - `--benchmark`; timing output is opt-in.
 
 An explicitly requested unavailable backend must fail clearly. It must never silently fall back to another backend, because that would invalidate comparisons.
@@ -419,9 +442,117 @@ Observed real-data results on device 0:
 
 These are smoke observations, not stable benchmarks. The uploaded source is an ordinary pageable Rust `Vec<u8>`; pinned-memory optimization was intentionally deferred. The exact canonical 28-byte BAM EOF marker terminates input and is excluded from counts. A malformed five-byte gzip prefix failed cleanly with compressed-offset context.
 
-## Later candidate: GPU per-block byte sums
+## Completed CUDA whole-file flagstat vertical slice
 
-After this slice, a likely next experiment is to upload block offsets/lengths and compute per-block wrapping byte sums, comparing them with host sums. It is not yet approved.
+### Implemented streaming structure
+
+The production-shaped command is now:
+
+```bash
+gpugeno flagstat INPUT.bam \
+  [--backend cuda] [--device N] [--bai INPUT.bam.bai] \
+  [--max-uncompressed-bytes N] [--benchmark] [--validate]
+```
+
+Normal `stdout` is the 16-line samtools-style summary. `--benchmark` writes metadata, batch, and separate CUDA-event H2D/kernel/D2H measurements to `stderr`. `--validate` classifies the same exact physical byte stream with the independent Rust implementation and requires all 32 counters to match. An unavailable explicit backend fails rather than falling back; only CUDA exists in this slice.
+
+The host path is deliberately layered for future pileup:
+
+1. `bai.rs` retains every nonzero linear-index entry as `(coordinate, virtual_offset)`, including repeated offsets. It separately derives a sorted/deduplicated physical flagstat view.
+2. BAM header parsing supplies an explicit first-record anchor. The BGZF EOF location supplies an explicit physical end anchor, covering header-adjacent and trailing unindexed records.
+3. `DisjointBamStream` reads/decompresses only one bounded batch at a time with one persistent libdeflate decompressor. An interior boundary member can be decompressed by both adjacent batches, but retained bytes are sliced into disjoint logical ranges.
+4. Every batch retains a BGZF-member map and can translate retained virtual offsets into 32-bit batch-relative positions. This is intended to support a later pileup planner without forcing pileup to use flagstat's deduplicated/disjoint work semantics.
+5. The CUDA call uploads bytes plus span starts, launches one 128-thread block per physical span, reads one 32-counter result per span, and reduces those partials on the host.
+
+The kernel preserves libshadowfax's classifier and QC pass/fail layout but uses the safer record-walk shape from newer CuBayes pileup: thread 0 builds a bounded shared table of at most 128 validated record starts, then lanes classify distinct records. Every record checks the four-byte size, minimum 32-byte BAM core, and span end before fixed fields are read. Malformed/non-record-aligned spans return per-span status rather than allowing an out-of-bounds access. The native C boundary also validates span ordering and retains the established synchronization rule on all post-enqueue failures.
+
+A span larger than the configured batch cap is currently rejected with its virtual offset; it is never skipped. A 4 MiB real-data run exercised this failure at virtual offset `169285607368`.
+
+### Automated and regression verification
+
+The self-contained suite now has 14 tests covering the previous BGZF cases plus BAI repeated-entry preservation/deduplication, classifier precedence and MAPQ 4/5 behavior, formatting, partial records, virtual-offset translation across a duplicated boundary member, exact retained bytes across bounded batches, and explicit rejection of an indivisible oversized span.
+
+Verified commands:
+
+```bash
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+git diff --check
+
+cargo run --release --example cuda_vector_add -- --device 0 --elements 1048576
+cargo run --release --example bam_upload -- \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --device 0 --max-uncompressed-bytes 4194304
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 \
+  --max-uncompressed-bytes 268435456 \
+  --benchmark --validate
+```
+
+All passed. The vector-add and upload examples remain working regression diagnostics.
+
+### Real-data correctness result
+
+The 256 MiB run emitted 2,284 spans from 2,285 physical anchors in 20 bounded batches. It classified 5,324,198,102 alignment-stream bytes; together with the 324,031-byte decompressed BAM header this exactly accounts for the previously measured 5,324,522,133 uncompressed bytes. The CUDA and Rust oracle counters matched exactly:
+
+```text
+10633980 + 0 in total (QC-passed reads + QC-failed reads)
+10633980 + 0 primary
+0 + 0 secondary
+0 + 0 supplementary
+0 + 0 duplicates
+0 + 0 primary duplicates
+10457612 + 0 mapped (98.34% : N/A)
+10457612 + 0 primary mapped (98.34% : N/A)
+10633980 + 0 paired in sequencing
+5317145 + 0 read1
+5316835 + 0 read2
+10254964 + 0 properly paired (96.44% : N/A)
+10281244 + 0 with itself and mate mapped
+176368 + 0 singletons (1.66% : N/A)
+22494 + 0 with mate mapped to a different chr
+22392 + 0 with mate mapped to a different chr (mapQ>=5)
+```
+
+This validates exact coverage on the representative file, including the final tail, but is not yet an external samtools/libshadowfax compatibility result: neither samtools nor pysam is installed, and the old executable was not used.
+
+### Smoke measurements
+
+These are single-run smoke observations on device 0, not stable benchmarks:
+
+```text
+256 MiB cap:
+  batches=20 spans=2,284 blocks_decompressed=82,360
+  logical_bytes=5,324,198,102 compressed_bytes_read=1,645,336,143
+  metadata=0.534 ms batch_build=7,093.901 ms
+  H2D=422.262 ms kernel=81.795 ms D2H=0.418 ms GPU_stage=504.475 ms
+  host_validation=941.771 ms wall=8,673.428 ms
+
+16 MiB cap:
+  batches=339 spans=2,284 blocks_decompressed=87,700
+  logical_bytes=5,324,198,102 compressed_bytes_read=1,750,900,852
+  metadata=0.435 ms batch_build=7,302.088 ms
+  H2D=427.934 ms kernel=1,118.026 ms D2H=6.532 ms GPU_stage=1,552.492 ms
+  host_validation=553.388 ms wall=9,504.120 ms
+```
+
+The logical bytes and all counters were identical at both batch sizes. Boundary-member rereads explain compressed bytes exceeding the 1,635,811,603-byte file and increasing with more batches. The dramatic summed kernel-time increase across 339 small launches shows that batch policy is part of meaningful backend comparison even with the same 2,284 spans. Sequential batch construction remains by far the largest measured stage, but parallel decompression and overlap remain intentionally unimplemented.
+
+### Remaining risks
+
+- Exact coverage is demonstrated for `HG002_chr22.bam`, not every valid sparse or unusual BAI. Oversized anchor gaps currently fail clearly.
+- The host oracle is a separate Rust implementation, but there is no external samtools result yet.
+- The shared index and BGZF mapping preserve what pileup needs, but pileup still needs an explicit policy for left-overlapping reads, right-side data extent, and a completion signal such as the status used by current CuBayes prescan/pileup.
+- Sequential processing has one live host batch and reusable device buffers but no worker pool, bounded channel, double buffering, or CPU/GPU overlap yet.
+- Boundary members are intentionally reread for simplicity. A future scheduler may retain them between batches.
+
+## Superseded candidate: GPU per-block byte sums
+
+This candidate was not implemented. The project owner selected the more ambitious whole-file flagstat slice instead.
 
 ## Flagstat semantic reference
 
@@ -572,8 +703,8 @@ If an assumption fails, record the evidence here before replacing the design.
 These are source observations, not yet reproduced test failures:
 
 - Mainline CuBayes does not contain a flagstat implementation; the kernel exists only in `libshadowfax`.
-- The old `libshadowfax` stream wrappers appear capable of returning `done`/`NULL` when a batch end reaches the EOF sentinel, potentially discarding the final batch. This must be tested, and accidental wrapper behavior must not define compatibility.
-- The old partitioner sometimes skips a single oversized window or zero-byte spans. That behavior is unsafe as a whole-file correctness contract and must not be copied without proving complete coverage.
+- The old `libshadowfax` stream wrappers appear capable of returning `done`/`NULL` when a batch end reaches the EOF sentinel, potentially discarding the final batch. The new path does not use those wrappers; explicit physical-end coverage accounted for the full representative stream.
+- The old partitioner sometimes skips a single oversized window or zero-byte spans. `gpugeno` instead rejects an indivisible oversized span and its tests verify that behavior; it never silently advances past one.
 - The old CPU decompression fallback allocates and frees a libdeflate decompressor for every BGZF block. `gpugeno` should prefer persistent worker-owned decompressors.
 - The old default path uses nvCOMP. `gpugeno` intentionally moves decompression to CPU libdeflate so that all GPU backends can share the same decompressed input path.
 
@@ -631,6 +762,14 @@ The first vertical slice confirmed that a real BAM prefix can be incrementally f
 
 One practical observation is that H2D from pageable Rust memory was about 21 ms for roughly 256 MiB, while summed libdeflate calls were about 315 ms. These single-run numbers do not establish a bottleneck, but they provide a baseline for deciding whether the next experiment should add GPU content verification, parallel decompression, or pinned memory.
 
+### CUDA whole-file flagstat outcome
+
+The project owner chose to skip the proposed checksum/readback micro-slices and integrate flagstat directly, while emphasizing that the host path must remain a streaming foundation for pileup. Inspection of both current CuBayes pileup and libshadowfax changed the implementation detail: the classifier semantics came from libshadowfax, but record discovery within each CUDA block uses the newer CuBayes-style thread-0 shared offset table with explicit bounds checks rather than duplicate `nth_read` traversal.
+
+The resulting bounded stream successfully converted BAI virtual offsets to decompressed batch positions, included explicit first/end anchors, and counted the complete representative BAM. Deduplicated anchors are only an operation-specific flagstat view; the source BAI representation keeps repeated coordinate-bearing windows because those repeats can be meaningful for pileup overlap. The 256 MiB and 16 MiB runs produced identical exact counters and alignment-stream byte totals, disproving the concern that the old wrapper's final-batch loss was inherent to index-anchored processing.
+
+The experiment also showed that batching cannot be treated as backend-neutral overhead without care: splitting the same 2,284 spans across 339 launches raised summed CUDA kernel event time from about 82 ms to about 1,118 ms. Sequential decompression/batch building remained about 7.1–7.3 seconds and dominated both runs. These are smoke observations, not final optimization conclusions.
+
 ### Project naming
 
 The prototype was initially called `sfxproto`. Before application code was created, it was renamed to **`gpugeno`**. The existing checkout paths containing `shadowfax` and the `libshadowfax` reference repository retain their names; they are not the application name.
@@ -654,7 +793,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-After the approved bounded upload slice, likely options include a GPU checksum experiment, CUDA flagstat, native `wgpu`, direct Vulkan, deeper streaming overlap, CUDA tuning, a CPU reference backend, or returning to pileup. The next choice should depend on observed correctness problems and timing breakdowns.
+Now that the CUDA flagstat slice is complete, plausible next experiments include parallel persistent libdeflate workers, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, native `wgpu` flagstat, direct Vulkan flagstat, external samtools compatibility validation, CUDA batch/launch tuning, or returning to pileup. None is approved; the next choice should be made from the completed timing and correctness evidence.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -666,18 +805,12 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate unresolved questions
 
-No next slice is approved. Ask the project owner to select **one** small experiment rather than treating this list as a roadmap. The most immediate candidates are:
+No next slice is approved. The next agent should ask the project owner to select one experiment. The most relevant uncertainties are:
 
-1. **Raw CUDA readback:** copy the uploaded contiguous byte buffer back without a kernel and compare it byte-for-byte. This is the thinnest content-verification step.
-2. **GPU per-block byte sums:** preserve/upload block offsets and lengths, compute wrapping sums, and compare with host sums. This introduces the first real-data GPU kernel.
-3. **Parallel libdeflate workers:** keep the GPU operation unchanged and test whether concurrent block decompression materially changes batch-build time.
-4. **Pinned host memory:** keep decompression and GPU work unchanged and isolate transfer behavior.
+1. **Pileup overlap/completion:** define and test how coordinate-bearing repeated BAI starts, left-overlapping reads, right-side batch extent, and kernel completion status combine without omissions or duplicate output.
+2. **Parallel libdeflate:** test a bounded persistent worker pool now that sequential batch construction is observed at roughly 7.1 seconds versus roughly 0.5 seconds of aggregate GPU stage time at the 256 MiB setting.
+3. **Portable backend:** implement the same immutable batch/span compute contract in native `wgpu` or direct Vulkan and compare exact counters/timing boundaries.
+4. **External compatibility:** obtain samtools or another independent implementation and record externally validated totals for the canonical BAM.
+5. **Batch/launch behavior:** isolate why 339 small batch launches report about 1.1 seconds of summed kernel time versus about 82 ms for 20 larger batches containing the same 2,284 spans.
 
-Longer-term unresolved questions:
-
-5. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
-6. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
-7. What fixed default BAM batch size should the later streaming pipeline use?
-8. Which timing and synchronization boundaries will remain comparable among CUDA, Vulkan, and `wgpu`?
-9. What exact expected totals should be recorded for `HG002_chr22.bam` after independently validating them?
-10. How much malformed-input validation belongs on the host before GPU dispatch? Valid input is assumed, but GPU out-of-bounds access is never acceptable.
+Longer-lived questions remain: how to split an unusually large unanchored physical span without indexing every record; whether boundary BGZF members should be retained rather than reread; and which timing/synchronization boundaries remain genuinely comparable across CUDA, Vulkan, and `wgpu`.

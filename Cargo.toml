@@ -2,7 +2,7 @@
 name = "gpugeno"
 version = "0.1.0"
 edition = "2021"
-description = "GPU-based BAM analysis prototype; currently the temporary bounded BGZF upload slice"
+description = "Streaming GPU implementations of operations over indexed BAM data"
 
 [dependencies]
 libdeflater = "1.26.0"

@@ -1,5 +1,5 @@
-//! Compiles the CUDA vector-add implementation with `nvcc` into a static
-//! archive and links it, together with the CUDA runtime, into the executable.
+//! Compiles the CUDA implementation with `nvcc` into a static archive and
+//! links it, together with the CUDA runtime, into the executable.
 //!
 //! The spike deliberately uses no build-time crates: a short explicit
 //! invocation keeps the native build easy to review and works offline.
