@@ -1,21 +1,47 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the Rust/CUDA spike and the bounded BGZF/libdeflate-to-CUDA upload slice are complete and coordinator-reviewed; no next slice is approved.
+**Current phase:** the Rust/CUDA spike and bounded BGZF/libdeflate-to-CUDA upload slice are complete and committed. The working tree is clean, and no next implementation slice is approved.
 
-## Fresh-agent handoff
+## First-class fresh-agent workflow
 
-If a new coding agent is told only to read this document and continue, it should do the following:
+This project intentionally has **no persistent coordinator agent**. `design.md` is the handoff boundary. A fresh coding agent should need only the instruction “read `design.md` and continue.” Every agent is responsible for leaving the repository and this document ready for the next fresh agent.
 
-1. Treat this document as the project memory and source of current product intent.
-2. Verify the repository and toolchain state, because those observations may have changed since the last update.
-3. Do not start another implementation slice without project-owner approval. Review the completed bounded-upload results and select the next smallest experiment.
-4. Put new `gpugeno` application code at the project root. Treat `cubayes/` and `libshadowfax/` as read-only reference repositories unless the project owner explicitly decides otherwise.
-5. Prefer the smallest experiment that answers one uncertainty; do not pre-design later pipeline stages.
-6. Investigate implementation details independently when they do not change product behavior. If a consequential choice or contradiction remains, ask the project owner one focused question at a time.
-7. After an approved experiment, update this document with the exact implementation, commands, measurements, and discoveries before proposing further work.
+### Start of every agent session
 
-The leading next candidate is GPU-side per-block byte sums, but it is not approved.
+1. Read this document completely before editing.
+2. Run `git status --short`, inspect recent `git log`, and verify that the documented current state still matches the checkout.
+3. Inspect only the source and reference files needed for the approved task; do not reload the full historical codebase by default.
+4. If this document says no next slice is approved, do not infer one. Present the smallest relevant options and ask the project owner one focused question at a time until one slice is selected.
+5. Record the selected slice and its explicit non-goals here before or alongside implementation so an interrupted session is recoverable.
+
+### During work
+
+- Work in small vertical experiments. Do not silently absorb likely future tasks into the current one.
+- A session may complete several small tasks only when each is explicitly selected from evidence produced by the previous task.
+- Treat `cubayes/` and `libshadowfax/` as read-only references unless the project owner explicitly decides otherwise.
+- Investigate reversible implementation details independently. Ask before changing product scope, compatibility, benchmark meaning, public interfaces, or expensive architecture.
+- Test normal behavior, relevant boundaries, and native error/resource-lifetime paths—not just the successful path.
+- Keep commits small and independently understandable.
+
+### End of every task or session
+
+1. Review the complete diff and run the documented verification commands.
+2. Update this file in the same task with:
+   - current phase and repository state;
+   - progress checklist;
+   - exact implementation and commands;
+   - observed measurements, labeled as smoke data or benchmarks;
+   - decisions and rationale;
+   - disproven assumptions, defects found during review, and remaining risks;
+   - the next approved slice, or an explicit statement that none is approved.
+3. Remove stale present-tense instructions. Preserve useful superseded decisions in the history section instead of leaving contradictory “current” guidance.
+4. Commit code and documentation together unless the task is blocked. Leave a clean working tree. If blocked or intentionally uncommitted, state exactly why and what remains both here and in the final response.
+5. Stop at the approved boundary. The next fresh agent must be able to continue from this document without access to prior chat transcripts.
+
+### Current handoff
+
+No implementation task is approved. The next agent should review the completed bounded-upload evidence and ask the project owner which single next uncertainty to test. Candidate experiments—not commitments—are listed under **Immediate unresolved questions**.
 
 ## Purpose of this document
 
@@ -33,7 +59,7 @@ This is a living design record, not a fixed long-range roadmap. The project is d
 
 Every coding agent working on this project should read this file first and update it as part of the same change when it learns something material.
 
-- Keep **Current state**, **Current decisions**, and the **immediate work** section accurate.
+- Keep **Current phase**, **Current state**, **Current decisions**, and **Current handoff** accurate.
 - Append concise entries to **Decision and discovery history**; do not erase useful history when a decision changes.
 - Mark an old decision as superseded and link it to the replacement.
 - Record measured facts with enough detail to reproduce them: command, input, hardware, and relevant result.
@@ -80,7 +106,7 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 
 ### Repository
 
-The root now contains a minimal Rust crate and temporary CUDA spike:
+The root now contains a minimal Rust/CUDA BAM prototype:
 
 - `Cargo.toml` and `Cargo.lock`
 - `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
@@ -93,14 +119,14 @@ The root now contains a minimal Rust crate and temporary CUDA spike:
 - `design.md`: this document
 - `cubayes/`: a clean CuBayes reference clone
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
-- `.gitignore`: ignores `/target` and alignment/index files
+- `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The spike, project metadata, and this design record are tracked. `cubayes/` and `libshadowfax/` remain separate nested reference repositories and are ignored by the root repository.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked; the latest completed implementation checkpoint is commit `708be5e` (`Add bounded BGZF CUDA upload slice`). `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
-Reference revisions at the time of this update:
+Reference revisions and locations at the time of this update:
 
-- `cubayes/`: branch `main`, commit `9687f167bdca43d19d379ed83cd52b98983fce6a`
-- `libshadowfax/`: branch `main`, commit `2db65c0b27000e5302ac57f0d9ef2be878662ee8`
+- `cubayes/`: branch `main`, commit `9687f167bdca43d19d379ed83cd52b98983fce6a`; upstream `git@gitlab.com:shadowfaxbio/cubayes`
+- `libshadowfax/`: branch `main`, commit `2db65c0b27000e5302ac57f0d9ef2be878662ee8`; this environment's origin is `/agents/shadowfax/origin/libshadowfax/`
 
 ### Development machine
 
@@ -132,6 +158,28 @@ A read-only metadata inspection on 2026-09-15 found:
 This supports trying linear-index anchors in a later flagstat experiment: this input has enough anchors for many CUDA workgroups, and no individual observed gap approaches a tentative hundreds-of-megabytes batch size. It does not yet prove whole-file coverage for arbitrary valid BAI files.
 
 The development environment may require the full CUDA and Vulkan development toolchains. Avoiding development dependencies is not a prototype goal.
+
+### Reproduce the current checkpoint
+
+From `/home/agent/shadowfax`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+
+cargo run --release --example cuda_vector_add -- \
+  --device 0 --elements 1048576
+
+cargo run --release --example bam_upload -- \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --device 0 --max-uncompressed-bytes 268435456
+```
+
+All commands passed at the current checkpoint. The examples are temporary diagnostics, not the intended final CLI.
 
 ### Progress
 
@@ -169,7 +217,7 @@ The development environment may require the full CUDA and Vulkan development too
 - **Working decision:** All GPU backends should receive deterministic, identical outer batches and spans. A backend may subdivide them internally.
 - **Decided:** Use a fixed default batch size and expose a batch-size argument. The actual default has not been selected.
 
-### First vertical slice boundaries
+### Completed first vertical slice boundaries
 
 - **Decided:** Process only one bounded prefix batch, not the entire BAM.
 - **Working default:** Cap the batch at 256 MiB of uncompressed bytes, configurable by the temporary example.
@@ -285,7 +333,7 @@ Rust-owned vectors and safe `CudaContext`
 
 The C API has three functions: create an opaque context for a numeric device, run vector addition with host pointers/count/timings/error buffer, and destroy the context. Calls return explicit status codes and NUL-terminated messages; C++ exceptions are caught at the boundary. The Rust wrapper owns destruction with `Drop` and preinitializes output metadata before unsafe calls.
 
-Coordinator review found and corrected two native error-path issues: a context leak if stream creation failed, and immediate returns that could leave asynchronous work touching borrowed Rust slices. Post-enqueue failures now best-effort synchronize before returning the original error.
+Review found and corrected two native error-path issues: a context leak if stream creation failed, and immediate returns that could leave asynchronous work touching borrowed Rust slices. Post-enqueue failures now best-effort synchronize before returning the original error.
 
 Verified commands:
 
@@ -297,7 +345,7 @@ cargo run --release --example cuda_vector_add -- --device 0 --elements 1048576
 cargo run --release --example cuda_vector_add -- --device 0 --elements 16777216
 ```
 
-All passed, and every output element was validated exactly. A coordinator-run 16,777,216-element sample on device 0 measured H2D 10.772 ms, kernel 0.726 ms, and D2H 24.918 ms. These are smoke observations, not benchmark results. Device 99 correctly failed with status 1 and reported that only three devices were available. The C symbols were confirmed unmangled in the executable, which dynamically links CUDA runtime 12 and `libstdc++`.
+All passed, and every output element was validated exactly. An independently repeated 16,777,216-element sample on device 0 measured H2D 10.772 ms, kernel 0.726 ms, and D2H 24.918 ms. These are smoke observations, not benchmark results. Device 99 correctly failed with status 1 and reported that only three devices were available. The C symbols were confirmed unmangled in the executable, which dynamically links CUDA runtime 12 and `libstdc++`.
 
 Current limitations are intentional: `sm_86` is hardcoded for the RTX 3060 development target; CUDA runtime and C++ runtime are shared system dependencies; buffers grow exactly to the requested capacity and do not shrink; the context is single-thread-oriented; and this temporary example is not a supported CLI.
 
@@ -355,9 +403,9 @@ cargo run --release --example bam_upload -- INPUT.bam \
   --device 0 --max-uncompressed-bytes 268435456
 ```
 
-Seven self-contained tests cover ordered concatenation, cap boundaries, first-member rejection, a 65,536-byte output member, missing `BC`, truncation, and canonical EOF handling. Coordinator verification passed `cargo fmt --check`, `cargo test`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and the vector-add regression.
+Seven self-contained tests cover ordered concatenation, cap boundaries, first-member rejection, a 65,536-byte output member, missing `BC`, truncation, and canonical EOF handling. Independent verification passed `cargo fmt --check`, `cargo test`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and the vector-add regression.
 
-Coordinator-observed real-data results on device 0:
+Observed real-data results on device 0:
 
 ```text
 4 MiB cap:
@@ -571,7 +619,7 @@ Two meanings of “put CUDA in the Rust program” were compared. One is to comp
 
 The integration spike validated the chosen packaging direction: Rust can own host data and a safe context wrapper while `nvcc`-compiled CUDA host/kernel code is statically included behind a C API. Build invalidation, device selection, transfers, CUDA-event timing, exact result validation, native errors, and RAII destruction all worked on the RTX 3060.
 
-The first implementation passed normal-path tests but coordinator review identified two subtle error-path defects: a partial-construction leak and possible asynchronous access to Rust-borrowed buffers after an error return. Both were corrected before acceptance. This is evidence that later native APIs must be reviewed specifically for partial resource construction and host-buffer lifetimes, not just successful execution.
+The first implementation passed normal-path tests, but review identified two subtle error-path defects: a partial-construction leak and possible asynchronous access to Rust-borrowed buffers after an error return. Both were corrected before acceptance. This is evidence that later native APIs must be reviewed specifically for partial resource construction and host-buffer lifetimes, not just successful execution.
 
 ### First vertical slice selected
 
@@ -618,12 +666,18 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate unresolved questions
 
-Do not answer all of these speculatively. Resolve them when the relevant experiment reaches the decision point, asking the project owner when behavior or scope is affected.
+No next slice is approved. Ask the project owner to select **one** small experiment rather than treating this list as a roadmap. The most immediate candidates are:
 
-1. Should the next experiment add GPU per-block byte sums and readback verification, parallel libdeflate workers, or pinned host memory?
-2. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
-3. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
-4. What fixed default BAM batch size should the later streaming pipeline use?
-5. Which timing and synchronization boundaries will remain comparable among CUDA, Vulkan, and `wgpu`?
-6. What exact expected totals should be recorded for `HG002_chr22.bam` after independently validating them?
-7. How much malformed-input validation belongs on the host before GPU dispatch? Valid input is assumed, but GPU out-of-bounds access is never acceptable.
+1. **Raw CUDA readback:** copy the uploaded contiguous byte buffer back without a kernel and compare it byte-for-byte. This is the thinnest content-verification step.
+2. **GPU per-block byte sums:** preserve/upload block offsets and lengths, compute wrapping sums, and compare with host sums. This introduces the first real-data GPU kernel.
+3. **Parallel libdeflate workers:** keep the GPU operation unchanged and test whether concurrent block decompression materially changes batch-build time.
+4. **Pinned host memory:** keep decompression and GPU work unchanged and isolate transfer behavior.
+
+Longer-term unresolved questions:
+
+5. For eventual flagstat, which BAI offsets safely form disjoint whole-file anchors: linear entries only, chunk boundaries too, or a validated combination?
+6. How should an unusually large span with no intermediate BAI anchor be split while preserving bounded memory and GPU parallelism?
+7. What fixed default BAM batch size should the later streaming pipeline use?
+8. Which timing and synchronization boundaries will remain comparable among CUDA, Vulkan, and `wgpu`?
+9. What exact expected totals should be recorded for `HG002_chr22.bam` after independently validating them?
+10. How much malformed-input validation belongs on the host before GPU dispatch? Valid input is assumed, but GPU out-of-bounds access is never acceptable.
