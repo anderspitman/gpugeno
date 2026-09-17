@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the bounded parallel libdeflate experiment is complete. `--threads N` drives a persistent, bounded worker pool shared by CUDA and `wgpu`; evidence selected eight workers as the default. No following slice is approved.
+**Current phase:** the `wgpu` raw-upload and reusable-buffer optimization is approved and delegated to a fresh interactive Pi session. It should remove the full BAM `Vec<u8>`→`Vec<u32>` packing pass, reduce staging/allocation overhead, and preserve a pileup-compatible operation-neutral input contract.
 
 ## First-class fresh-agent workflow
 
@@ -41,11 +41,13 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The bounded parallel BGZF/libdeflate task is complete at the current checkpoint. The public `--threads N` option defaults to 8. The indexed stream owns persistent workers, each with one reused libdeflate decompressor; it permits at most one compressed member per worker and reorders completed members by deterministic sequence before exposing a batch. Both backends retained the exact 20 batches, 2,284 spans, 5,324,198,102 logical bytes, compressed-byte/block counts, and all flagstat counters at 1, 2, 4, 8, and 16 workers.
+The approved task is a focused `wgpu` host-feeding optimization. Keep `IndexedBamBatch.data` as the canonical Rust-owned byte stream shared by all backends and future pileup. Upload its already-little-endian raw memory representation directly to WGSL-readable `array<u32>` storage, handling at most the final three padding bytes safely and retaining the logical byte count separately. Eliminate the full per-batch `Vec<u8>`→`Vec<u32>` conversion.
 
-No next implementation slice is approved. Do not infer one. Plausible separate choices remain the `wgpu` packing/staging/resource-reuse bottleneck, optional CUDA packaging for non-NVIDIA deployment, actual non-NVIDIA validation, pipeline overlap, direct Vulkan, or pileup; the project owner must select the next bounded task.
+Add grow-only reusable `wgpu` BAM input, upload/staging, span, parameter, result, status, timestamp, and readback resources where practical. Treat the current implementation as one reusable buffer slot whose lifetime model does not prevent future double buffering; synchronize before reusing that slot. Keep operation-neutral input/upload resources separate from flagstat-specific pipelines and result buffers so pileup can reuse the same raw BAM representation later.
 
-The first `wgpu` implementation still has a separate major host-side inefficiency: current representative runs spend roughly 3.7–3.8 seconds packing 5.3 GiB of BAM bytes and 1.9–2.1 seconds writing staging buffers, versus about 0.33–0.50 seconds in the measured GPU stage. It also allocates per-batch resources. This is not WGSL kernel time and was intentionally not changed by the decompression experiment.
+Measure and report before/after host packing, staging, setup, GPU stages, and wall time on the canonical BAM. Preserve adapter selection/reporting, exact counters, CUDA behavior, bounded memory, explicit timing labels, and all tests.
+
+Explicit non-goals: direct decompression into mapped `wgpu` memory, CPU/GPU or batch overlap, multiple buffer slots, parallel-pipeline redesign, WGSL/CUDA kernel tuning, pileup, direct Vulkan, optional-CUDA packaging, and non-NVIDIA validation.
 
 ## Purpose of this document
 
@@ -229,7 +231,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Implement and validate the native real-WGSL `wgpu` flagstat backend.
 - [x] Select bounded parallel libdeflate decompression as the next experiment.
 - [x] Implement and benchmark `--threads N` with persistent bounded workers.
-- [ ] Select the next bounded slice; none is currently approved.
+- [x] Select raw `wgpu` upload and reusable buffers as the next optimization.
+- [ ] Eliminate full host packing, reuse one synchronized resource slot, and benchmark the result.
 
 ## Current decisions
 
@@ -273,7 +276,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** Pack arbitrary BAM bytes into little-endian `u32` words for portable WGSL storage access. Report packing, staging writes, and per-batch resource setup separately rather than folding them into transfer or kernel time.
 - **Decided:** The WGSL kernel uses one 128-lane workgroup per existing span, a bounded shared record-offset table, workgroup atomic `u32` counters, and one 32-counter partial per span. The host widens and reduces partials into the common `u64` counters.
 - **Decided:** When both required timestamp features exist, H2D copies, the compute pass, and D2H copies use GPU timestamps. Otherwise the same three stages are separately submitted, synchronized, host-timed, and labeled `host-synchronized`.
-- **Observed performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers, compared with about 0.46 seconds for timestamped H2D+kernel+D2H. Those costs and per-batch allocation are explicitly reported and remain a separate future optimization; they must not be described as GPU kernel cost.
+- **Approved optimization boundary:** Retain `IndexedBamBatch.data` as canonical, directly upload its raw little-endian bytes with only final-word padding, and reuse grow-only resources in a synchronized single slot. Do not couple BGZF decompression to `wgpu` memory or make flagstat-specific output assumptions part of the shared upload abstraction.
+- **Observed performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers, compared with about 0.46 seconds for timestamped H2D+kernel+D2H. After parallel libdeflate, repeated runs still spent roughly 3.7–3.8 seconds packing and 1.9–2.1 seconds staging. Those costs and per-batch allocation are explicitly reported and must not be described as GPU kernel cost.
 - **Explicit non-goals:** direct Vulkan, pileup, browser execution, parallel decompression, pipeline overlap, CUDA tuning, and acquiring non-NVIDIA hardware.
 
 ### Completed first vertical slice boundaries
@@ -1015,7 +1019,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, and bounded parallel decompression slices are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, focused `wgpu` packing/staging reuse, a pileup overlap/completion prototype, direct Vulkan flagstat, or backend tuning. None is an approved next slice; the project owner must choose one before implementation.
+Now that CUDA, native `wgpu`, and bounded parallel decompression slices are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. The currently approved `wgpu` raw-upload/resource-reuse task is the only committed next slice.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -1027,4 +1031,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate approved task
 
-No next slice is approved. The bounded parallel-libdeflate experiment is complete; stop here until the project owner selects a new bounded task.
+Implement and benchmark the `wgpu` raw-upload and reusable single-slot resource optimization described in **Current handoff**. Success requires removing the full packing pass, materially reducing measured staging/setup overhead, preserving exact representative bytes/spans/counters and CUDA regressions, retaining a pileup-compatible shared input abstraction, updating this document with exact evidence and risks, and committing a clean tree. At completion, state explicitly that no following slice is approved unless the project owner selects one.
