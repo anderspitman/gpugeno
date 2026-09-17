@@ -657,6 +657,7 @@ The immediately following CUDA regression run produced identical counters and co
 ### Remaining `wgpu` risks
 
 - Actual non-NVIDIA hardware is still required. The observed Vulkan-on-NVIDIA path only establishes that CUDA is not being called.
+- **Packaging portability gap:** `build.rs` still invokes `nvcc` unconditionally, and even `--backend wgpu` uses an executable dynamically linked to `libcudart.so.12` and `libstdc++`. A normal AMD/Intel machine without the CUDA toolkit therefore cannot yet build or launch the portable backend. Before non-NVIDIA validation, make CUDA compilation/linkage an optional Cargo feature or deliberately provision the CUDA toolkit and record that limitation.
 - The default test suite now executes a small real `wgpu` dispatch and therefore requires at least one hardware adapter at enumerated index 0 in addition to the project's existing CUDA build-tool requirement.
 - Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
 - The prototype creates device/staging/readback buffers per batch and performs a full byte-to-word packing pass. Reuse, direct mapped packing, and pipeline overlap are intentionally deferred.
