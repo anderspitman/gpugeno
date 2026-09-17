@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the `wgpu` raw-upload and reusable-buffer optimization is approved and delegated to a fresh interactive Pi session. It should remove the full BAM `Vec<u8>`→`Vec<u32>` packing pass, reduce staging/allocation overhead, and preserve a pileup-compatible operation-neutral input contract.
+**Current phase:** the approved `wgpu` raw-upload and reusable single-slot optimization is complete. It removed the full BAM `Vec<u8>`→`Vec<u32>` packing pass, added bounded grow-only resources, preserved exact counters and CUDA behavior, and materially reduced portable-backend wall time. No following slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,13 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The approved task is a focused `wgpu` host-feeding optimization. Keep `IndexedBamBatch.data` as the canonical Rust-owned byte stream shared by all backends and future pileup. Upload its already-little-endian raw memory representation directly to WGSL-readable `array<u32>` storage, handling at most the final three padding bytes safely and retaining the logical byte count separately. Eliminate the full per-batch `Vec<u8>`→`Vec<u32>` conversion.
+The approved `wgpu` host-feeding optimization is complete in commit history. `IndexedBamBatch.data` remains the canonical Rust-owned byte stream. The portable backend copies those bytes directly into a reusable mapped upload buffer, zeroes only the final zero to three bytes required for a complete storage word, and passes the unpadded logical byte count separately. One explicit synchronized slot owns grow-only power-of-two-class input/upload, span, parameter, result/status, timestamp, and readback resources. Operation-neutral raw BAM/span resources are structurally separate from flagstat's pipeline, parameters, and outputs, leaving a clear boundary for pileup and a future slot pool.
 
-Add grow-only reusable `wgpu` BAM input, upload/staging, span, parameter, result, status, timestamp, and readback resources where practical. Treat the current implementation as one reusable buffer slot whose lifetime model does not prevent future double buffering; synchronize before reusing that slot. Keep operation-neutral input/upload resources separate from flagstat-specific pipelines and result buffers so pileup can reuse the same raw BAM representation later.
+The paired representative run reduced reported packing from 3,808.327 ms to zero, staging writes from 1,919.175 ms to 314.014 ms, resource setup from 116.167 ms to 92.337 ms, and wall time from 11,509.907 ms to 4,785.535 ms. These are paired single-run benchmark-mode observations, not a timing distribution. Exact details and commands are in **Completed `wgpu` raw-upload and reusable single-slot optimization**.
 
-Measure and report before/after host packing, staging, setup, GPU stages, and wall time on the canonical BAM. Preserve adapter selection/reporting, exact counters, CUDA behavior, bounded memory, explicit timing labels, and all tests.
-
-Explicit non-goals: direct decompression into mapped `wgpu` memory, CPU/GPU or batch overlap, multiple buffer slots, parallel-pipeline redesign, WGSL/CUDA kernel tuning, pileup, direct Vulkan, optional-CUDA packaging, and non-NVIDIA validation.
+No following slice is approved. Do not start direct mapped decompression, overlap/double buffering, kernel tuning, pileup, direct Vulkan, optional CUDA packaging, or non-NVIDIA work unless the project owner selects it.
 
 ## Purpose of this document
 
@@ -127,7 +125,7 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
 - `src/main.rs`: explicit CUDA/`wgpu` `gpugeno flagstat` CLI and whole-file orchestration
 - `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
-- `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, staging/timestamps/readback, and the real portable compute classifier
+- `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, direct canonical-byte upload through one grow-only synchronized resource slot, reusable timestamps/readback, and the real portable compute classifier
 - `src/bgzf.rs`: validated BGZF framing, the sequential prefix diagnostic, virtual offsets, and persistent bounded libdeflate workers
 - `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
 - `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
@@ -141,7 +139,7 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The bounded parallel decompression experiment is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The raw-upload/reusable-resource optimization is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -232,7 +230,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Select bounded parallel libdeflate decompression as the next experiment.
 - [x] Implement and benchmark `--threads N` with persistent bounded workers.
 - [x] Select raw `wgpu` upload and reusable buffers as the next optimization.
-- [ ] Eliminate full host packing, reuse one synchronized resource slot, and benchmark the result.
+- [x] Eliminate full host packing, reuse one synchronized resource slot, and benchmark the result.
 
 ## Current decisions
 
@@ -273,11 +271,11 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** `wgpu` is now the default, while `--backend cuda` and `--backend wgpu` remain explicit. Direct `--backend vulkan` fails clearly because it is not implemented; no selector silently changes backend.
 - **Decided:** Numeric `--device` means the index in `wgpu`'s enumerated adapter list for the `wgpu` backend. The selected adapter name, underlying API, device type, driver, and timing source are always reported on `stderr`.
 - **Decided:** Reject adapters reported as CPU devices. This prevents an explicit GPU backend request from quietly becoming llvmpipe or another software implementation.
-- **Decided:** Pack arbitrary BAM bytes into little-endian `u32` words for portable WGSL storage access. Report packing, staging writes, and per-batch resource setup separately rather than folding them into transfer or kernel time.
+- **Decided:** Upload arbitrary BAM bytes directly from canonical `IndexedBamBatch.data` into WGSL-readable `array<u32>` storage. The mapped upload copy clears only the final zero to three padding bytes; a uniform carries the separate logical byte count. Report the eliminated packing metric as zero, mapped staging writes, and resource growth/binding setup separately rather than folding them into transfer or kernel time.
 - **Decided:** The WGSL kernel uses one 128-lane workgroup per existing span, a bounded shared record-offset table, workgroup atomic `u32` counters, and one 32-counter partial per span. The host widens and reduces partials into the common `u64` counters.
 - **Decided:** When both required timestamp features exist, H2D copies, the compute pass, and D2H copies use GPU timestamps. Otherwise the same three stages are separately submitted, synchronized, host-timed, and labeled `host-synchronized`.
-- **Approved optimization boundary:** Retain `IndexedBamBatch.data` as canonical, directly upload its raw little-endian bytes with only final-word padding, and reuse grow-only resources in a synchronized single slot. Do not couple BGZF decompression to `wgpu` memory or make flagstat-specific output assumptions part of the shared upload abstraction.
-- **Observed performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers, compared with about 0.46 seconds for timestamped H2D+kernel+D2H. After parallel libdeflate, repeated runs still spent roughly 3.7–3.8 seconds packing and 1.9–2.1 seconds staging. Those costs and per-batch allocation are explicitly reported and must not be described as GPU kernel cost.
+- **Completed optimization boundary:** `IndexedBamBatch.data` remains canonical. One synchronized slot reuses grow-only operation-neutral BAM/upload and span buffers separately from flagstat's pipeline, parameters, results/statuses, timestamps, and readbacks. BGZF decompression remains independent of `wgpu` memory.
+- **Observed resolved performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers; after parallel libdeflate, repeated runs still spent roughly 3.7–3.8 seconds packing and 1.9–2.1 seconds staging. The completed raw-upload/reuse task eliminated packing and reduced the paired staging observation to 314 ms without hiding either cost in GPU timing.
 - **Explicit non-goals:** direct Vulkan, pileup, browser execution, parallel decompression, pipeline overlap, CUDA tuning, and acquiring non-NVIDIA hardware.
 
 ### Completed first vertical slice boundaries
@@ -670,7 +668,7 @@ The immediately following CUDA regression run produced identical counters and co
 - **Packaging portability gap:** `build.rs` still invokes `nvcc` unconditionally, and even `--backend wgpu` uses an executable dynamically linked to `libcudart.so.12` and `libstdc++`. A normal AMD/Intel machine without the CUDA toolkit therefore cannot yet build or launch the portable backend. Before non-NVIDIA validation, make CUDA compilation/linkage an optional Cargo feature or deliberately provision the CUDA toolkit and record that limitation.
 - The default test suite now executes a small real `wgpu` dispatch and therefore requires at least one hardware adapter at enumerated index 0 in addition to the project's existing CUDA build-tool requirement.
 - Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
-- The prototype creates device/staging/readback buffers per batch and performs a full byte-to-word packing pass. Reuse, direct mapped packing, and pipeline overlap are intentionally deferred.
+- The initial implementation's fresh per-batch buffers and full byte-to-word packing pass were removed by the completed raw-upload/reuse optimization. The current slot remains intentionally synchronized; direct mapped decompression and pipeline overlap are still deferred.
 - As before, representative correctness does not imply production handling of every malformed BAM or pathological BAI.
 
 ## Completed bounded parallel libdeflate experiment
@@ -752,7 +750,83 @@ Risks and limits:
 - The one-worker path includes OS-thread/channel/reordering overhead and is a common-path baseline, not a promise to equal the old direct sequential implementation's timing.
 - Out-of-order outputs are bounded by the outer batch, but `Vec` capacity can exceed logical bytes according to Rust's growth policy. The queue/job envelope itself is strictly bounded by worker count.
 - Worker shutdown joins all threads. Normal, decoder-error, oversized-span, and representative paths terminate, but forced cancellation of a hypothetical stuck native libdeflate call is not implemented.
-- This does not change the existing unusual-BAI, external-samtools, non-NVIDIA, or CUDA-packaging risks. It also deliberately does not overlap CPU and GPU stages or alter `wgpu` packing/staging, GPU kernels, pileup, or reference repositories.
+- That experiment did not change the existing unusual-BAI, external-samtools, non-NVIDIA, or CUDA-packaging risks. It deliberately did not overlap CPU/GPU stages or alter the then-current `wgpu` packing/staging path, GPU kernels, pileup, or reference repositories; packing/staging was optimized in the subsequent completed slice.
+
+## Completed `wgpu` raw-upload and reusable single-slot optimization
+
+### Implementation and lifetime model
+
+`IndexedBamBatch.data: Vec<u8>` is unchanged and remains the canonical operation-neutral BAM stream. `WgpuContext::flagstat` no longer allocates or fills a `Vec<u32>`. It maps the slot's reusable upload buffer, copies the canonical bytes once, and zeroes only the final zero to three bytes needed to align the GPU copy to a four-byte storage word. WGSL continues to extract little-endian bytes from `array<u32>`, while the existing parameter uniform carries `data.len()` rather than the padded allocation/copy size. The representative WGSL test now begins with a 37-byte record and ends on a non-word boundary, exercising unaligned record offsets and final-word padding against the independent host classifier.
+
+The context owns one explicit `WgpuBufferSlot`. Its operation-neutral `WgpuInputSlot` contains BAM device/upload and span device/upload pairs. A separate flagstat slot contains parameter device/upload, partial-result/status device buffers, matching mapped readbacks, reusable timestamp query/resolve/readback resources, and the bind group; the pipeline is also flagstat state rather than shared input state. This prevents flagstat's output shape from becoming the future pileup input contract. A future slot pool can replicate the slot, but this task deliberately keeps one slot and fully synchronizes/maps results before reuse.
+
+Every variable-sized resource is grow-only. Capacities use the next power-of-two size class, clamped to the adapter's storage/buffer limit; the 256 MiB outer cap therefore uses one 256 MiB BAM device buffer and one 256 MiB upload buffer rather than repeated near-cap growth. Logical copy/readback sizes remain per batch. A size class is less than twice the requested size, so retained capacity is bounded; during a later growth the replaced old and new resources may coexist transiently while handles are dropped. Timestamp resources and the 16-byte parameter pair are created once. Bind groups are rebuilt only when a bound resource grows. No decompressor writes into mapped GPU memory, and no overlap or second slot was introduced.
+
+Timing labels remain distinct. `wgpu_host_packing=0.000 ms` means the conversion pass does not exist, not that hidden work was moved; `wgpu_upload_mode=raw-little-endian` makes that explicit. `wgpu_staging_write` includes map completion, the one canonical-byte copy, span/parameter writes, and final padding. `wgpu_resource_setup` includes slot capacity checks, actual growth allocations, timestamp creation, and required bind-group rebuilds. H2D/kernel/D2H remain GPU timestamp intervals on the tested adapter and do not include those host stages.
+
+### Paired representative benchmark
+
+A before run was captured immediately before editing, and the after run used the final size-class implementation. Both are single release-mode benchmark observations with host validation enabled—not medians or a timing distribution—on adapter 0 (`NVIDIA GeForce RTX 3060`, Vulkan, NVIDIA driver `550.163.01`, `gpu-timestamps`). Both used the canonical BAM, the established 256 MiB cap, and eight decompression workers:
+
+```bash
+target/release/gpugeno flagstat /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 \
+  --max-uncompressed-bytes 268435456 --threads 8 \
+  --benchmark --validate
+```
+
+| measured stage | before (ms) | after (ms) | paired change |
+|---|---:|---:|---:|
+| full host packing | 3,808.327 | 0.000 | eliminated |
+| mapped staging writes | 1,919.175 | 314.014 | -83.6% |
+| resource setup/growth | 116.167 | 92.337 | -20.5% |
+| H2D GPU timestamp | 249.666 | 222.228 | observation only |
+| kernel GPU timestamp | 113.489 | 51.198 | observation only |
+| D2H GPU timestamp | 0.237 | 0.124 | observation only |
+| aggregate GPU stage | 363.391 | 273.550 | -24.7%, run variance not isolated |
+| batch build | 1,800.176 | 1,750.537 | observation only |
+| host validation | 872.492 | 858.281 | observation only |
+| wall | 11,509.907 | 4,785.535 | -58.4% |
+
+The separately reported packing+staging+setup sum fell from 5,843.669 ms to 406.351 ms (93.0%). Only packing removal and host resource feeding are attributed to this change; the lower GPU timestamp and batch/validation observations are not claimed as kernel or decompression improvements. Wall includes adapter/context initialization, submission/map waits, validation, and other orchestration not represented by the summed stage labels.
+
+Both runs retained exactly 20 batches, 2,284 spans from 2,285 anchors, 82,360 decompressed members, 5,324,198,102 logical alignment bytes, and 1,645,336,143 compressed bytes read. Both matched all host-oracle counters. Their 16-line outputs were byte-identical with SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`.
+
+### Verification, regressions, and remaining risks
+
+The final verification set was:
+
+```bash
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+git diff --check
+
+cargo run --release --example cuda_vector_add -- \
+  --device 0 --elements 1048576
+cargo run --release --example bam_upload -- \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --device 0 --max-uncompressed-bytes 4194304
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+```
+
+All 19 tests passed. The CUDA representative regression retained the same coverage and exact host match, and its output was byte-identical to final `wgpu`; its CUDA-event times were H2D 384.492 ms, kernel 81.556 ms, D2H 0.469 ms, and wall 3,248.793 ms. The CUDA vector-add and bounded-upload diagnostics also passed. These are regression observations, not a refreshed cross-API benchmark.
+
+Remaining risks and limits:
+
+- The optimization was validated only on the documented NVIDIA/Vulkan adapter. It does not add non-NVIDIA evidence or change the CUDA packaging gap.
+- The mapped-upload approach depends on `wgpu`'s portable buffer mapping/copy semantics, but only the timestamp-capable path was exercised. Host-synchronized timing fallback still compiles and retains its labels but was not run.
+- Power-of-two size classes trade bounded retained slack (less than one requested size) for avoiding repeated near-cap growth. A growth can transiently retain old and new handles; this remains bounded but is not a hard process-RSS measurement.
+- A single slot intentionally serializes map/write, GPU work, and readback. There is no decompression-to-mapped-memory path, overlap, double buffering, multiple in-flight batches, or kernel change.
+- Packing is reported as zero because the pass was deleted; final padding and the raw byte copy are included in staging time. Comparing only the zero packing field while ignoring staging would be misleading.
 
 ## Superseded candidate: GPU per-block byte sums
 
@@ -881,7 +955,7 @@ The duplicate traversal is acceptable because it avoids a serial host pass that 
 
 ### Current portable direction
 
-- Preserve index-anchored GPU-side record discovery when the first CUDA flagstat experiment is approved.
+- Both completed GPU backends preserve index-anchored device-side record discovery.
 - Treat a BAI virtual offset as `(compressed BGZF offset << 16) | uncompressed offset`.
 - Convert virtual offsets into offsets in each decompressed batch.
 - Deduplicate or otherwise handle repeated BAI offsets without dropping data.
@@ -990,6 +1064,12 @@ The shared indexed stream now uses deterministic parallel member decompression r
 
 On the representative 24-CPU host, median CUDA batch construction fell from 7.855 seconds with one worker to 1.781 seconds with eight. Sixteen workers reached only 1.763 seconds, so eight became the default rather than spending twice the workers for about 1% further improvement. The `wgpu` checks showed the same decompression trend and exact counters, while its separate packing/staging costs remained visible and dominant after decompression sped up.
 
+### Raw `wgpu` upload and reusable-slot outcome
+
+The portable host-feeding cost was not inherent to WGSL byte access. BAM is already a byte stream in the little-endian representation consumed by the shader, so the full `Vec<u32>` materialization was redundant. Copying the raw bytes into a reusable mapped upload buffer and clearing only the final partial word preserved exact counters, including a new deliberately unaligned synthetic record case.
+
+Resource reuse benefited from bounded size classes rather than exact growth: near-cap batches can differ slightly in size, so exact grow-only allocation may still recreate a 256 MiB pair several times. Next-power-of-two classes, clamped to device limits, made the established 256 MiB run settle after its first input allocation while retaining a less-than-two-times capacity bound. The final paired observation cut host packing/staging/setup from 5.844 seconds to 0.406 seconds and wall from 11.510 seconds to 4.786 seconds. It did not justify adding overlap or coupling decompression to GPU memory; one synchronized slot remains the current architecture.
+
 ### CuBayes actor implementation is not authoritative
 
 The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
@@ -1019,7 +1099,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, and bounded parallel decompression slices are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. The currently approved `wgpu` raw-upload/resource-reuse task is the only committed next slice.
+Now that CUDA, native `wgpu`, bounded parallel decompression, and the raw-upload/reusable-slot optimization are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. None is currently approved.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -1031,4 +1111,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate approved task
 
-Implement and benchmark the `wgpu` raw-upload and reusable single-slot resource optimization described in **Current handoff**. Success requires removing the full packing pass, materially reducing measured staging/setup overhead, preserving exact representative bytes/spans/counters and CUDA regressions, retaining a pileup-compatible shared input abstraction, updating this document with exact evidence and risks, and committing a clean tree. At completion, state explicitly that no following slice is approved unless the project owner selects one.
+None. The `wgpu` raw-upload and reusable single-slot optimization is complete. Wait for the project owner to select the next slice; do not infer one from the deferred possibilities.

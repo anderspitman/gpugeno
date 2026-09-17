@@ -83,7 +83,7 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let anchor_count = stream.anchor_count();
-    let context = match args.backend {
+    let mut context = match args.backend {
         BackendChoice::Cuda => BackendContext::Cuda(
             CudaContext::create(args.device).map_err(|error| error.to_string())?,
         ),
@@ -136,7 +136,7 @@ fn run() -> Result<(), String> {
             host_total.add_assign(&batch_host);
         }
 
-        match &context {
+        match &mut context {
             BackendContext::Cuda(context) => {
                 let result =
                     context
@@ -220,7 +220,7 @@ fn run() -> Result<(), String> {
         );
         if matches!(args.backend, BackendChoice::Wgpu) {
             eprintln!(
-                "gpugeno benchmark: wgpu_host_packing={packing_ms:.3} ms wgpu_staging_write={staging_ms:.3} ms wgpu_resource_setup={setup_ms:.3} ms"
+                "gpugeno benchmark: wgpu_host_packing={packing_ms:.3} ms wgpu_staging_write={staging_ms:.3} ms wgpu_resource_setup={setup_ms:.3} ms wgpu_upload_mode=raw-little-endian"
             );
         }
         if args.validate {

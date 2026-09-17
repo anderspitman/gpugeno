@@ -1,6 +1,6 @@
-// One workgroup classifies one record-aligned BAM span. The host packs the
-// byte stream into little-endian u32 words because portable WGSL storage
-// buffers cannot expose an array of bytes.
+// One workgroup classifies one record-aligned BAM span. The host uploads the
+// canonical little-endian BAM bytes directly, with zero padding only through
+// the final complete u32 storage word. The logical byte count remains separate.
 
 struct Parameters {
     byte_count: u32,

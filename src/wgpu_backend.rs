@@ -7,7 +7,6 @@
 use crate::bam::FlagstatCounters;
 use std::sync::mpsc;
 use std::time::Instant;
-use wgpu::util::DeviceExt;
 
 const COUNTERS_PER_SPAN: usize = 32;
 const TIMESTAMP_COUNT: u32 = 6;
@@ -39,11 +38,12 @@ impl std::fmt::Display for WgpuTimingSource {
 
 #[derive(Debug, Clone, Copy)]
 pub struct WgpuTimings {
-    /// CPU time spent packing BAM bytes into portable little-endian u32 words.
+    /// Legacy comparison metric for the removed full byte-to-word packing pass.
+    /// Direct raw-byte upload leaves this at zero.
     pub packing_ms: f64,
-    /// CPU time spent creating and filling mapped staging buffers.
+    /// CPU time spent mapping and filling reusable upload buffers.
     pub staging_ms: f64,
-    /// CPU time spent creating per-batch GPU resources and bindings.
+    /// CPU time spent checking/growing slot resources and rebuilding bindings.
     pub setup_ms: f64,
     pub h2d_ms: f64,
     pub kernel_ms: f64,
@@ -77,10 +77,69 @@ impl std::error::Error for WgpuError {}
 pub struct WgpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
+    flagstat: WgpuFlagstatState,
+    slot: WgpuBufferSlot,
     adapter_info: WgpuAdapterInfo,
     limits: wgpu::Limits,
     timestamp_mode: bool,
+}
+
+/// Operation-neutral BAM bytes and physical work spans. This is deliberately
+/// separate from flagstat's parameters and outputs so a later operation can
+/// bind the same canonical raw-byte representation without inheriting the
+/// flagstat result layout.
+#[derive(Default)]
+struct WgpuInputSlot {
+    data: Option<UploadBuffer>,
+    spans: Option<UploadBuffer>,
+}
+
+#[derive(Default)]
+struct WgpuFlagstatSlot {
+    parameters: Option<UploadBuffer>,
+    results: Option<ReadbackBuffer>,
+    statuses: Option<ReadbackBuffer>,
+    timestamps: Option<TimestampBuffers>,
+    bind_group: Option<wgpu::BindGroup>,
+}
+
+/// The current synchronized resource slot. A call completes all mapping and
+/// GPU work before this slot can be reused. Keeping the slot explicit leaves
+/// room for a future pool without adding overlap in this optimization.
+#[derive(Default)]
+struct WgpuBufferSlot {
+    input: WgpuInputSlot,
+    flagstat: WgpuFlagstatSlot,
+}
+
+struct WgpuFlagstatState {
+    pipeline: wgpu::ComputePipeline,
+}
+
+struct UploadBuffer {
+    device: wgpu::Buffer,
+    upload: wgpu::Buffer,
+    capacity: u64,
+}
+
+struct ReadbackBuffer {
+    device: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    capacity: u64,
+}
+
+struct TimestampBuffers {
+    query_set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+}
+
+#[derive(Clone, Copy)]
+struct BatchBufferSizes {
+    data: u64,
+    spans: u64,
+    results: u64,
+    statuses: u64,
 }
 
 impl WgpuContext {
@@ -165,7 +224,8 @@ impl WgpuContext {
         Ok(Self {
             device,
             queue,
-            pipeline,
+            flagstat: WgpuFlagstatState { pipeline },
+            slot: WgpuBufferSlot::default(),
             adapter_info: WgpuAdapterInfo {
                 index: adapter_index,
                 name: info.name,
@@ -192,7 +252,7 @@ impl WgpuContext {
     }
 
     pub fn flagstat(
-        &self,
+        &mut self,
         data: &[u8],
         span_starts: &[u32],
     ) -> Result<WgpuFlagstatBatch, WgpuError> {
@@ -205,111 +265,61 @@ impl WgpuContext {
         let status_bytes = span_count
             .checked_mul(std::mem::size_of::<u32>())
             .ok_or_else(|| WgpuError::new("wgpu status buffer size overflow"))?;
-        let packed_bytes = data.len().div_ceil(4) * 4;
-        self.check_limits(packed_bytes, result_bytes, status_bytes, span_count)?;
-
-        let packing_start = Instant::now();
-        let packed_data = pack_bytes(data);
-        let parameters = [data.len() as u32, span_count as u32, 0, 0];
-        let packing_ms = elapsed_ms(packing_start);
-
-        let staging_start = Instant::now();
-        let data_staging =
-            self.staging_buffer("BAM upload staging", bytemuck::cast_slice(&packed_data));
-        let spans_staging =
-            self.staging_buffer("span upload staging", bytemuck::cast_slice(span_starts));
-        let params_staging = self.staging_buffer(
-            "parameter upload staging",
-            bytemuck::cast_slice(&parameters),
-        );
-        let staging_ms = elapsed_ms(staging_start);
-
-        let setup_start = Instant::now();
-        let data_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("BAM data"),
-            size: packed_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let spans_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("span starts"),
-            size: std::mem::size_of_val(span_starts) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let params_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("flagstat parameters"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let results_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("flagstat partial counters"),
-            size: result_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let statuses_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("flagstat statuses"),
-            size: status_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let result_readback =
-            self.readback_buffer("flagstat counter readback", result_bytes as u64);
-        let status_readback = self.readback_buffer("flagstat status readback", status_bytes as u64);
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flagstat bind group"),
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[
-                binding(0, &data_buffer),
-                binding(1, &spans_buffer),
-                binding(2, &results_buffer),
-                binding(3, &statuses_buffer),
-                binding(4, &params_buffer),
-            ],
-        });
-        let setup_ms = elapsed_ms(setup_start);
-
-        let stage_times = if self.timestamp_mode {
-            self.run_timestamped(
-                span_count as u32,
-                &bind_group,
-                &data_staging,
-                &spans_staging,
-                &params_staging,
-                &data_buffer,
-                &spans_buffer,
-                &params_buffer,
-                &results_buffer,
-                &statuses_buffer,
-                &result_readback,
-                &status_readback,
-                result_bytes as u64,
-                status_bytes as u64,
-            )?
-        } else {
-            self.run_host_timed(
-                span_count as u32,
-                &bind_group,
-                &data_staging,
-                &spans_staging,
-                &params_staging,
-                &data_buffer,
-                &spans_buffer,
-                &params_buffer,
-                &results_buffer,
-                &statuses_buffer,
-                &result_readback,
-                &status_readback,
-                result_bytes as u64,
-                status_bytes as u64,
-            )?
+        let padded_data_bytes = padded_data_size(data.len())
+            .ok_or_else(|| WgpuError::new("wgpu padded data size overflow"))?;
+        self.check_limits(padded_data_bytes, result_bytes, status_bytes, span_count)?;
+        let sizes = BatchBufferSizes {
+            data: padded_data_bytes as u64,
+            spans: std::mem::size_of_val(span_starts) as u64,
+            results: result_bytes as u64,
+            statuses: status_bytes as u64,
         };
 
-        let result_words = map_u32_buffer(&self.device, &result_readback, result_bytes)?;
-        let statuses = map_u32_buffer(&self.device, &status_readback, status_bytes)?;
+        let setup_start = Instant::now();
+        self.ensure_slot(sizes)?;
+        let setup_ms = elapsed_ms(setup_start);
+
+        // IndexedBamBatch::data remains the canonical byte stream. Copy those
+        // bytes directly into the mapped upload buffer and clear only the at
+        // most three bytes needed to make the storage copy word-aligned.
+        let parameters = [data.len() as u32, span_count as u32, 0, 0];
+        let staging_start = Instant::now();
+        write_upload_buffer(
+            &self.device,
+            self.slot.input.data.as_ref().unwrap(),
+            data,
+            sizes.data,
+        )?;
+        write_upload_buffer(
+            &self.device,
+            self.slot.input.spans.as_ref().unwrap(),
+            bytemuck::cast_slice(span_starts),
+            sizes.spans,
+        )?;
+        write_upload_buffer(
+            &self.device,
+            self.slot.flagstat.parameters.as_ref().unwrap(),
+            bytemuck::cast_slice(&parameters),
+            16,
+        )?;
+        let staging_ms = elapsed_ms(staging_start);
+
+        let stage_times = if self.timestamp_mode {
+            self.run_timestamped(span_count as u32, sizes)?
+        } else {
+            self.run_host_timed(span_count as u32, sizes)?
+        };
+
+        let result_words = map_u32_buffer(
+            &self.device,
+            &self.slot.flagstat.results.as_ref().unwrap().readback,
+            result_bytes,
+        )?;
+        let statuses = map_u32_buffer(
+            &self.device,
+            &self.slot.flagstat.statuses.as_ref().unwrap().readback,
+            status_bytes,
+        )?;
         if let Some((span, status)) = statuses
             .iter()
             .copied()
@@ -336,7 +346,7 @@ impl WgpuContext {
         Ok(WgpuFlagstatBatch {
             span_counts,
             timings: WgpuTimings {
-                packing_ms,
+                packing_ms: 0.0,
                 staging_ms,
                 setup_ms,
                 h2d_ms: stage_times[0],
@@ -345,6 +355,77 @@ impl WgpuContext {
                 source: self.timing_source(),
             },
         })
+    }
+
+    fn ensure_slot(&mut self, sizes: BatchBufferSizes) -> Result<(), WgpuError> {
+        let storage_limit = self
+            .limits
+            .max_storage_buffer_binding_size
+            .min(self.limits.max_buffer_size);
+        let data_capacity = growth_capacity(sizes.data, storage_limit);
+        let span_capacity = growth_capacity(sizes.spans, storage_limit);
+        let result_capacity = growth_capacity(sizes.results, storage_limit);
+        let status_capacity = growth_capacity(sizes.statuses, storage_limit);
+        let mut bindings_changed = false;
+        bindings_changed |= ensure_upload_buffer(
+            &self.device,
+            &mut self.slot.input.data,
+            "BAM data",
+            "BAM upload staging",
+            data_capacity,
+            wgpu::BufferUsages::STORAGE,
+        );
+        bindings_changed |= ensure_upload_buffer(
+            &self.device,
+            &mut self.slot.input.spans,
+            "span starts",
+            "span upload staging",
+            span_capacity,
+            wgpu::BufferUsages::STORAGE,
+        );
+        bindings_changed |= ensure_upload_buffer(
+            &self.device,
+            &mut self.slot.flagstat.parameters,
+            "flagstat parameters",
+            "parameter upload staging",
+            16,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        bindings_changed |= ensure_readback_buffer(
+            &self.device,
+            &mut self.slot.flagstat.results,
+            "flagstat partial counters",
+            "flagstat counter readback",
+            result_capacity,
+        );
+        bindings_changed |= ensure_readback_buffer(
+            &self.device,
+            &mut self.slot.flagstat.statuses,
+            "flagstat statuses",
+            "flagstat status readback",
+            status_capacity,
+        );
+        if self.timestamp_mode && self.slot.flagstat.timestamps.is_none() {
+            self.slot.flagstat.timestamps = Some(create_timestamp_buffers(&self.device));
+        }
+
+        if bindings_changed || self.slot.flagstat.bind_group.is_none() {
+            let input = &self.slot.input;
+            let flagstat = &self.slot.flagstat;
+            self.slot.flagstat.bind_group =
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("flagstat bind group"),
+                    layout: &self.flagstat.pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        binding(0, &input.data.as_ref().unwrap().device),
+                        binding(1, &input.spans.as_ref().unwrap().device),
+                        binding(2, &flagstat.results.as_ref().unwrap().device),
+                        binding(3, &flagstat.statuses.as_ref().unwrap().device),
+                        binding(4, &flagstat.parameters.as_ref().unwrap().device),
+                    ],
+                }));
+        }
+        Ok(())
     }
 
     fn check_limits(
@@ -377,107 +458,56 @@ impl WgpuContext {
         Ok(())
     }
 
-    fn staging_buffer(&self, label: &'static str, contents: &[u8]) -> wgpu::Buffer {
-        self.device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage: wgpu::BufferUsages::COPY_SRC,
-            })
-    }
-
-    fn readback_buffer(&self, label: &'static str, size: u64) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn run_timestamped(
         &self,
         span_count: u32,
-        bind_group: &wgpu::BindGroup,
-        data_staging: &wgpu::Buffer,
-        spans_staging: &wgpu::Buffer,
-        params_staging: &wgpu::Buffer,
-        data_buffer: &wgpu::Buffer,
-        spans_buffer: &wgpu::Buffer,
-        params_buffer: &wgpu::Buffer,
-        results_buffer: &wgpu::Buffer,
-        statuses_buffer: &wgpu::Buffer,
-        result_readback: &wgpu::Buffer,
-        status_readback: &wgpu::Buffer,
-        result_bytes: u64,
-        status_bytes: u64,
+        sizes: BatchBufferSizes,
     ) -> Result<[f64; 3], WgpuError> {
-        let query_set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("flagstat stage timestamps"),
-            ty: wgpu::QueryType::Timestamp,
-            count: TIMESTAMP_COUNT,
-        });
-        let query_resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("flagstat timestamp resolve"),
-            size: u64::from(TIMESTAMP_COUNT) * 8,
-            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let query_readback = self.readback_buffer(
-            "flagstat timestamp readback",
-            u64::from(TIMESTAMP_COUNT) * 8,
-        );
+        let timestamps = self.slot.flagstat.timestamps.as_ref().unwrap();
+        let bind_group = self.slot.flagstat.bind_group.as_ref().unwrap();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("timestamped flagstat commands"),
             });
-        encoder.write_timestamp(&query_set, 0);
-        encode_uploads(
-            &mut encoder,
-            data_staging,
-            spans_staging,
-            params_staging,
-            data_buffer,
-            spans_buffer,
-            params_buffer,
-        );
-        encoder.write_timestamp(&query_set, 1);
+        encoder.write_timestamp(&timestamps.query_set, 0);
+        encode_uploads(&mut encoder, &self.slot, sizes);
+        encoder.write_timestamp(&timestamps.query_set, 1);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("flagstat compute"),
                 timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                    query_set: &query_set,
+                    query_set: &timestamps.query_set,
                     beginning_of_pass_write_index: Some(2),
                     end_of_pass_write_index: Some(3),
                 }),
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.flagstat.pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(span_count, 1, 1);
         }
-        encoder.write_timestamp(&query_set, 4);
-        encode_readbacks(
-            &mut encoder,
-            results_buffer,
-            statuses_buffer,
-            result_readback,
-            status_readback,
-            result_bytes,
-            status_bytes,
-        );
-        encoder.write_timestamp(&query_set, 5);
-        encoder.resolve_query_set(&query_set, 0..TIMESTAMP_COUNT, &query_resolve, 0);
-        encoder.copy_buffer_to_buffer(
-            &query_resolve,
+        encoder.write_timestamp(&timestamps.query_set, 4);
+        encode_readbacks(&mut encoder, &self.slot, sizes);
+        encoder.write_timestamp(&timestamps.query_set, 5);
+        encoder.resolve_query_set(
+            &timestamps.query_set,
+            0..TIMESTAMP_COUNT,
+            &timestamps.resolve,
             0,
-            &query_readback,
+        );
+        encoder.copy_buffer_to_buffer(
+            &timestamps.resolve,
+            0,
+            &timestamps.readback,
             0,
             u64::from(TIMESTAMP_COUNT) * 8,
         );
         self.queue.submit([encoder.finish()]);
-        let words = map_u64_buffer(&self.device, &query_readback, TIMESTAMP_COUNT as usize * 8)?;
+        let words = map_u64_buffer(
+            &self.device,
+            &timestamps.readback,
+            TIMESTAMP_COUNT as usize * 8,
+        )?;
         let period_ns = f64::from(self.queue.get_timestamp_period());
         Ok([
             ticks_ms(words[0], words[1], period_ns),
@@ -486,23 +516,10 @@ impl WgpuContext {
         ])
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn run_host_timed(
         &self,
         span_count: u32,
-        bind_group: &wgpu::BindGroup,
-        data_staging: &wgpu::Buffer,
-        spans_staging: &wgpu::Buffer,
-        params_staging: &wgpu::Buffer,
-        data_buffer: &wgpu::Buffer,
-        spans_buffer: &wgpu::Buffer,
-        params_buffer: &wgpu::Buffer,
-        results_buffer: &wgpu::Buffer,
-        statuses_buffer: &wgpu::Buffer,
-        result_readback: &wgpu::Buffer,
-        status_readback: &wgpu::Buffer,
-        result_bytes: u64,
-        status_bytes: u64,
+        sizes: BatchBufferSizes,
     ) -> Result<[f64; 3], WgpuError> {
         let upload_start = Instant::now();
         let mut upload = self
@@ -510,15 +527,7 @@ impl WgpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("flagstat upload commands"),
             });
-        encode_uploads(
-            &mut upload,
-            data_staging,
-            spans_staging,
-            params_staging,
-            data_buffer,
-            spans_buffer,
-            params_buffer,
-        );
+        encode_uploads(&mut upload, &self.slot, sizes);
         self.queue.submit([upload.finish()]);
         wait(&self.device)?;
         let h2d_ms = elapsed_ms(upload_start);
@@ -534,8 +543,8 @@ impl WgpuContext {
                 label: Some("flagstat compute"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_pipeline(&self.flagstat.pipeline);
+            pass.set_bind_group(0, self.slot.flagstat.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(span_count, 1, 1);
         }
         self.queue.submit([compute.finish()]);
@@ -548,15 +557,7 @@ impl WgpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("flagstat readback commands"),
             });
-        encode_readbacks(
-            &mut readback,
-            results_buffer,
-            statuses_buffer,
-            result_readback,
-            status_readback,
-            result_bytes,
-            status_bytes,
-        );
+        encode_readbacks(&mut readback, &self.slot, sizes);
         self.queue.submit([readback.finish()]);
         wait(&self.device)?;
         let d2h_ms = elapsed_ms(readback_start);
@@ -582,14 +583,144 @@ fn validate_input(data: &[u8], span_starts: &[u32]) -> Result<(), WgpuError> {
     Ok(())
 }
 
-fn pack_bytes(data: &[u8]) -> Vec<u32> {
-    data.chunks(4)
-        .map(|chunk| {
-            let mut bytes = [0u8; 4];
-            bytes[..chunk.len()].copy_from_slice(chunk);
-            u32::from_le_bytes(bytes)
-        })
-        .collect()
+fn padded_data_size(byte_count: usize) -> Option<usize> {
+    byte_count.checked_add(3).map(|count| count / 4 * 4)
+}
+
+fn growth_capacity(required: u64, maximum: u64) -> u64 {
+    required
+        .checked_next_power_of_two()
+        .unwrap_or(required)
+        .min(maximum)
+}
+
+fn ensure_upload_buffer(
+    device: &wgpu::Device,
+    current: &mut Option<UploadBuffer>,
+    device_label: &'static str,
+    upload_label: &'static str,
+    required: u64,
+    binding_usage: wgpu::BufferUsages,
+) -> bool {
+    if current
+        .as_ref()
+        .is_some_and(|buffers| buffers.capacity >= required)
+    {
+        return false;
+    }
+    *current = Some(UploadBuffer {
+        device: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(device_label),
+            size: required,
+            usage: binding_usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
+        upload: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(upload_label),
+            size: required,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }),
+        capacity: required,
+    });
+    true
+}
+
+fn ensure_readback_buffer(
+    device: &wgpu::Device,
+    current: &mut Option<ReadbackBuffer>,
+    device_label: &'static str,
+    readback_label: &'static str,
+    required: u64,
+) -> bool {
+    if current
+        .as_ref()
+        .is_some_and(|buffers| buffers.capacity >= required)
+    {
+        return false;
+    }
+    *current = Some(ReadbackBuffer {
+        device: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(device_label),
+            size: required,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }),
+        readback: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(readback_label),
+            size: required,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }),
+        capacity: required,
+    });
+    true
+}
+
+fn create_timestamp_buffers(device: &wgpu::Device) -> TimestampBuffers {
+    let bytes = u64::from(TIMESTAMP_COUNT) * 8;
+    TimestampBuffers {
+        query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("flagstat stage timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: TIMESTAMP_COUNT,
+        }),
+        resolve: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flagstat timestamp resolve"),
+            size: bytes,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }),
+        readback: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flagstat timestamp readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }),
+    }
+}
+
+fn write_upload_buffer(
+    device: &wgpu::Device,
+    buffers: &UploadBuffer,
+    contents: &[u8],
+    copy_size: u64,
+) -> Result<(), WgpuError> {
+    if copy_size > buffers.capacity
+        || !copy_size.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+        || contents.len() as u64 > copy_size
+        || copy_size - contents.len() as u64 > 3
+    {
+        return Err(WgpuError::new("internal invalid wgpu upload size"));
+    }
+    let slice = buffers.upload.slice(..copy_size);
+    let (sender, receiver) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Write, move |result| {
+        let _ = sender.send(result);
+    });
+    wait(device)?;
+    receiver
+        .recv()
+        .map_err(|error| WgpuError::new(format!("wgpu map callback was lost: {error}")))?
+        .map_err(|error| WgpuError::new(format!("wgpu upload mapping failed: {error}")))?;
+    let mut view = match slice.get_mapped_range_mut() {
+        Ok(view) => view,
+        Err(error) => {
+            buffers.upload.unmap();
+            return Err(WgpuError::new(format!(
+                "getting wgpu upload range failed: {error}"
+            )));
+        }
+    };
+    let padding = view.len() - contents.len();
+    view.slice(..contents.len()).copy_from_slice(contents);
+    if padding != 0 {
+        view.slice(contents.len()..)
+            .copy_from_slice(&[0u8; 3][..padding]);
+    }
+    drop(view);
+    buffers.upload.unmap();
+    Ok(())
 }
 
 fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -599,33 +730,28 @@ fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn encode_uploads(
     encoder: &mut wgpu::CommandEncoder,
-    data_staging: &wgpu::Buffer,
-    spans_staging: &wgpu::Buffer,
-    params_staging: &wgpu::Buffer,
-    data_buffer: &wgpu::Buffer,
-    spans_buffer: &wgpu::Buffer,
-    params_buffer: &wgpu::Buffer,
+    slot: &WgpuBufferSlot,
+    sizes: BatchBufferSizes,
 ) {
-    encoder.copy_buffer_to_buffer(data_staging, 0, data_buffer, 0, data_buffer.size());
-    encoder.copy_buffer_to_buffer(spans_staging, 0, spans_buffer, 0, spans_buffer.size());
-    encoder.copy_buffer_to_buffer(params_staging, 0, params_buffer, 0, params_buffer.size());
+    let data = slot.input.data.as_ref().unwrap();
+    let spans = slot.input.spans.as_ref().unwrap();
+    let parameters = slot.flagstat.parameters.as_ref().unwrap();
+    encoder.copy_buffer_to_buffer(&data.upload, 0, &data.device, 0, sizes.data);
+    encoder.copy_buffer_to_buffer(&spans.upload, 0, &spans.device, 0, sizes.spans);
+    encoder.copy_buffer_to_buffer(&parameters.upload, 0, &parameters.device, 0, 16);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn encode_readbacks(
     encoder: &mut wgpu::CommandEncoder,
-    results_buffer: &wgpu::Buffer,
-    statuses_buffer: &wgpu::Buffer,
-    result_readback: &wgpu::Buffer,
-    status_readback: &wgpu::Buffer,
-    result_bytes: u64,
-    status_bytes: u64,
+    slot: &WgpuBufferSlot,
+    sizes: BatchBufferSizes,
 ) {
-    encoder.copy_buffer_to_buffer(results_buffer, 0, result_readback, 0, result_bytes);
-    encoder.copy_buffer_to_buffer(statuses_buffer, 0, status_readback, 0, status_bytes);
+    let results = slot.flagstat.results.as_ref().unwrap();
+    let statuses = slot.flagstat.statuses.as_ref().unwrap();
+    encoder.copy_buffer_to_buffer(&results.device, 0, &results.readback, 0, sizes.results);
+    encoder.copy_buffer_to_buffer(&statuses.device, 0, &statuses.readback, 0, sizes.statuses);
 }
 
 fn wait(device: &wgpu::Device) -> Result<(), WgpuError> {
@@ -706,14 +832,27 @@ mod tests {
     }
 
     #[test]
-    fn byte_packing_preserves_little_endian_offsets_and_padding() {
-        assert_eq!(pack_bytes(&[1, 2, 3, 4, 5]), [0x0403_0201, 5]);
+    fn grow_only_capacity_uses_bounded_power_of_two_classes() {
+        assert_eq!(growth_capacity(5, 1024), 8);
+        assert_eq!(growth_capacity(1024, 1024), 1024);
+        assert_eq!(growth_capacity(999, 1000), 1000);
+    }
+
+    #[test]
+    fn direct_upload_padding_is_at_most_one_partial_word() {
+        assert_eq!(padded_data_size(1), Some(4));
+        assert_eq!(padded_data_size(4), Some(4));
+        assert_eq!(padded_data_size(5), Some(8));
+        assert_eq!(padded_data_size(usize::MAX), None);
     }
 
     #[test]
     fn real_wgsl_classifier_matches_host_on_representative_flags() {
-        let context = WgpuContext::create(0).expect("a hardware wgpu adapter is required");
-        let mut data = record(0x100 | 0x800 | 0x400, 60, 0, 0);
+        let mut context = WgpuContext::create(0).expect("a hardware wgpu adapter is required");
+        let mut first = record(0x100 | 0x800 | 0x400, 60, 0, 0);
+        first[..4].copy_from_slice(&33u32.to_le_bytes());
+        first.push(0x7f);
+        let mut data = first;
         data.extend(record(0x001 | 0x040 | 0x002, 4, 0, 1));
         let second_span = data.len() as u32;
         data.extend(record(0x001 | 0x080, 5, 0, 1));
