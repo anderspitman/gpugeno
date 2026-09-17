@@ -233,7 +233,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` is the first f
 
 - **Decided:** Process the complete representative BAM through bounded streaming batches; this is not another prefix-only experiment.
 - **Decided:** Deliver a CUDA-only `gpugeno flagstat` path with samtools-style output and separate H2D, kernel, and D2H measurements when benchmarking is requested.
-- **Decided:** Take architectural inspiration from both current CuBayes pileup and libshadowfax flagstat, but do not copy their known skip/final-batch defects or unsafe assumptions.
+- **Decided:** Take architectural inspiration from current CuBayes pileup and classifier semantics from libshadowfax flagstat, but do not copy known skip/final-batch defects or unsafe assumptions. `cubayes/src/cubayes_main.cu` plus `cubayes/lib/cubayes/pipeline.h` are the current orchestration reference. The project owner reports that `cubayes_main_actor.cu` is a faster parallel experiment suspected of crash/freeze bugs; it is not a correctness or lifecycle reference, and any idea taken from it requires independent validation.
 - **Decided:** Preserve BAI linear entries as coordinate-bearing work items in a reusable shared representation. Flagstat may derive sorted, deduplicated physical anchors to count each BAM record exactly once. Future pileup must be able to retain repeated offsets and genomic windows because overlap semantics differ.
 - **Decided:** Separate metadata/work planning, bounded BGZF decompression plus virtual-to-batch offset translation, backend execution, and result reduction. Keep only bounded batch data resident so worker pools, double buffering, or stage overlap can be added without replacing the operation contract.
 - **Decided:** Add explicit first-record and physical-end coverage for header-adjacent and trailing/unindexed records. Never silently skip zero-length, oversized, or final spans. The first implementation may clearly reject an anchor gap that cannot fit the configured batch.
@@ -786,6 +786,12 @@ The project owner chose to skip the proposed checksum/readback micro-slices and 
 The resulting bounded stream successfully converted BAI virtual offsets to decompressed batch positions, included explicit first/end anchors, and counted the complete representative BAM. Deduplicated anchors are only an operation-specific flagstat view; the source BAI representation keeps repeated coordinate-bearing windows because those repeats can be meaningful for pileup overlap. The 256 MiB and 16 MiB runs produced identical exact counters and alignment-stream byte totals, disproving the concern that the old wrapper's final-batch loss was inherent to index-anchored processing.
 
 The experiment also showed that batching cannot be treated as backend-neutral overhead without care: splitting the same 2,284 spans across 339 launches raised summed CUDA kernel event time from about 82 ms to about 1,118 ms. Sequential decompression/batch building remained about 7.1–7.3 seconds and dominated both runs. These are smoke observations, not final optimization conclusions.
+
+### CuBayes actor implementation is not authoritative
+
+The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
+
+Both paths use prescan status and trailing-window walkback, but their no-progress policies differ materially. The non-actor pipeline stops when the first window is incomplete rather than discarding it. The actor contains an explicit `SKIP` branch that advances one work item when no region completes; that may lose a difficult region and must not be copied. Even the non-actor stop behavior is not automatically the desired gpugeno policy: gpugeno should report a clear bounded-resource error or deliberately retry with a justified larger envelope, rather than hang, silently skip, or return partial success.
 
 ### Project naming
 
