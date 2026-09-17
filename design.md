@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the CUDA whole-file flagstat vertical slice and source-layout cleanup are complete. The flagstat device code now lives in `cuda/flagstat.cu`, and high-frequency monitoring independently confirmed execution on GPU 0. No next implementation slice is approved.
+**Current phase:** a native `wgpu` flagstat backend is approved and delegated to a fresh interactive Pi session. It should reuse the existing bounded indexed BAM stream, execute a real WGSL classifier, and provide the first non-CUDA backend evidence.
 
 ## First-class fresh-agent workflow
 
@@ -41,7 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-No next implementation task is approved. The project owner clarified that gpugeno is a funded portability demonstration, not a production bioinformatics tool. The next choice should prioritize visible cross-platform evidence over production-hardening CUDA input edge cases. The smallest strong candidate is a native `wgpu` flagstat backend using the existing bounded batches and the same representative BAM; implementing it on the current NVIDIA/Vulkan host establishes the non-CUDA path, but the project must also arrange a run on actual non-NVIDIA hardware before claiming that evidence.
+The approved task is a native `wgpu` flagstat vertical slice. Reuse the immutable decompressed batches and span starts; add explicit `--backend wgpu` execution with a real WGSL compute kernel, adapter/API reporting, exact comparison to the existing representative counters, and honest upload/kernel/readback measurements. Keep CUDA working and never silently fall back between backends.
+
+Use portable bounded per-span `u32` partial counters followed by host `u64` reduction if required by WGSL portability. Any byte packing or host-timed fallback must be measured/labeled rather than hidden. The implementation may prioritize the canonical BAM and targeted fixtures over production-grade malformed/pathological input behavior.
+
+Explicit non-goals for this slice: direct Vulkan, pileup, browser execution, parallel decompression, CPU/GPU pipeline overlap, CUDA tuning, and obtaining non-NVIDIA hardware. A later run on actual non-NVIDIA hardware is still required for the full proposal claim.
 
 ## Purpose of this document
 
@@ -841,12 +845,6 @@ When revisiting portable backends, preserve these general intentions unless evid
 - Report the actual adapter and underlying API used by `wgpu`; on Linux/NVIDIA it may itself use Vulkan.
 - Keep filesystem/decompression orchestration out of the compute contract so a future browser host remains plausible.
 
-## Immediate unresolved questions
+## Immediate approved task
 
-No next slice is approved. Given the clarified demonstration goal, the recommended next experiment is:
-
-1. **Native `wgpu` flagstat backend:** reuse the immutable indexed batches, implement a real WGSL classifier, select/report the adapter and underlying API, produce the same 32 counters on `HG002_chr22.bam`, and report upload/kernel/readback separately. Portable WGSL likely requires bounded per-span `u32` partial counters followed by host `u64` reduction rather than CUDA's `u64` atomics.
-
-Follow-up evidence—not part of that slice—would be an actual run on non-NVIDIA hardware. Other candidates are direct Vulkan flagstat or a deliberately representative CUDA pileup vertical slice, but either delays the strongest missing proposal evidence.
-
-Do not spend the next slice on production hardening unless a defect prevents the representative run, creates unsafe GPU access, omits substantial normal work, or gives one backend an artificial performance advantage.
+Implement the native `wgpu` flagstat backend described in **Current handoff**. Success means `--backend wgpu` executes WGSL over the canonical BAM, reports its actual adapter/API, produces the same 32 counters as CUDA, exposes honest stage timings, and leaves all verification passing. Update this section at completion with evidence and either the next approved slice or an explicit statement that none is approved.
