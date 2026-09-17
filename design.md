@@ -41,7 +41,7 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-No next implementation task is approved. The flagstat kernel is now clearly separated from common CUDA host/context code. If GPU utilization appears absent, distinguish the upload-only example from the real flagstat command and remember that the default 256 MiB run performs only about 0.5 seconds of GPU-stage work amid roughly 7.1 seconds of sequential batch construction.
+No next implementation task is approved. The project owner clarified that gpugeno is a funded portability demonstration, not a production bioinformatics tool. The next choice should prioritize visible cross-platform evidence over production-hardening CUDA input edge cases. The smallest strong candidate is a native `wgpu` flagstat backend using the existing bounded batches and the same representative BAM; implementing it on the current NVIDIA/Vulkan host establishes the non-CUDA path, but the project must also arrange a run on actual non-NVIDIA hardware before claiming that evidence.
 
 ## Purpose of this document
 
@@ -101,6 +101,15 @@ The intended backend selector is:
 ```
 
 Backends are allowed to be optimized independently. This is a comparison of practical implementations, not a requirement to run transliterations of one identical shader.
+
+### Prototype purpose and evidence standard
+
+- **Decided:** This is a research/funding demonstration of porting realistic CUDA bioinformatics workloads to cross-platform GPU APIs, not a production tool intended for external bioinformatics users.
+- **Decided:** Cross-platform evidence is now the primary project priority. CUDA-only pileup progress does not by itself address the proposal's portability claim.
+- **Decided:** A backend must execute a genuine GPU classifier/pileup workload with representative data. It must not hide a CPU implementation behind a backend selector or silently fall back.
+- **Decided:** Results should agree on the canonical representative input and targeted synthetic fixtures so comparisons remain credible. Memory safety, bounded resources, complete normal-file processing, and honest transfer/kernel/readback timing remain required.
+- **Deferred:** Production-grade behavior for every malformed BAM, pathological BAI, unusual oversized span, exhaustive samtools compatibility detail, and sophisticated retry/recovery. Implement these only when needed to avoid crashes on the demonstration corpus or a materially unrealistic performance advantage.
+- **Decided:** Portability must ultimately be demonstrated by running on actual non-NVIDIA hardware. A `wgpu` or Vulkan backend running over Vulkan on this NVIDIA development machine proves a non-CUDA software path, but not the complete hardware claim.
 
 ## Current state
 
@@ -787,6 +796,12 @@ The resulting bounded stream successfully converted BAI virtual offsets to decom
 
 The experiment also showed that batching cannot be treated as backend-neutral overhead without care: splitting the same 2,284 spans across 339 launches raised summed CUDA kernel event time from about 82 ms to about 1,118 ms. Sequential decompression/batch building remained about 7.1–7.3 seconds and dominated both runs. These are smoke observations, not final optimization conclusions.
 
+### Demonstration scope clarified
+
+The project owner clarified that gpugeno supports a funding proposal's cross-platform claim rather than aiming to become an externally used bioinformatics application. This supersedes the implicit production-quality standard that had begun to drive discussion of rare BAI gaps, exhaustive overlap recovery, and malformed input. Representative correctness is still necessary—otherwise performance could come from doing less work—but it is a means of making the portability comparison believable.
+
+This shifts the immediate priority away from additional CUDA pileup correctness machinery. With a complete CUDA flagstat baseline already available, a native `wgpu` flagstat backend is the smallest useful proof that the same realistic operation can execute without CUDA. Direct Vulkan and pileup remain relevant later. Because `wgpu` on Linux/NVIDIA will likely select Vulkan on an NVIDIA device, final proposal evidence still requires access to an AMD, Intel, Apple, or other non-NVIDIA GPU and recording its adapter/backend and results.
+
 ### CuBayes actor implementation is not authoritative
 
 The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
@@ -828,12 +843,10 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate unresolved questions
 
-No next slice is approved. The next agent should ask the project owner to select one experiment. The most relevant uncertainties are:
+No next slice is approved. Given the clarified demonstration goal, the recommended next experiment is:
 
-1. **Pileup overlap/completion:** define and test how coordinate-bearing repeated BAI starts, left-overlapping reads, right-side batch extent, and kernel completion status combine without omissions or duplicate output.
-2. **Parallel libdeflate:** test a bounded persistent worker pool now that sequential batch construction is observed at roughly 7.1 seconds versus roughly 0.5 seconds of aggregate GPU stage time at the 256 MiB setting.
-3. **Portable backend:** implement the same immutable batch/span compute contract in native `wgpu` or direct Vulkan and compare exact counters/timing boundaries.
-4. **External compatibility:** obtain samtools or another independent implementation and record externally validated totals for the canonical BAM.
-5. **Batch/launch behavior:** isolate why 339 small batch launches report about 1.1 seconds of summed kernel time versus about 82 ms for 20 larger batches containing the same 2,284 spans.
+1. **Native `wgpu` flagstat backend:** reuse the immutable indexed batches, implement a real WGSL classifier, select/report the adapter and underlying API, produce the same 32 counters on `HG002_chr22.bam`, and report upload/kernel/readback separately. Portable WGSL likely requires bounded per-span `u32` partial counters followed by host `u64` reduction rather than CUDA's `u64` atomics.
 
-Longer-lived questions remain: how to split an unusually large unanchored physical span without indexing every record; whether boundary BGZF members should be retained rather than reread; and which timing/synchronization boundaries remain genuinely comparable across CUDA, Vulkan, and `wgpu`.
+Follow-up evidence—not part of that slice—would be an actual run on non-NVIDIA hardware. Other candidates are direct Vulkan flagstat or a deliberately representative CUDA pileup vertical slice, but either delays the strongest missing proposal evidence.
+
+Do not spend the next slice on production hardening unless a defect prevents the representative run, creates unsafe GPU access, omits substantial normal work, or gives one backend an artificial performance advantage.
