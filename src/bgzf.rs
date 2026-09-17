@@ -1,12 +1,13 @@
-//! Minimal BGZF framing and bounded prefix decompression for the upload spike.
-//!
-//! This module deliberately builds one batch. It is not a general streaming
-//! abstraction and does not interpret BAM records.
+//! Validated BGZF framing, bounded prefix decompression for the upload
+//! diagnostic, and the persistent bounded worker path used by indexed BAM
+//! streaming.
 
 use libdeflater::Decompressor;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const GZIP_FIXED_HEADER_LEN: usize = 10;
@@ -102,6 +103,7 @@ impl VirtualOffset {
 
 /// One fully framed and decompressed BGZF member. BAM metadata parsing and
 /// indexed batch construction use this to share framing and integrity checks.
+#[derive(Debug)]
 pub(crate) struct BgzfBlock {
     pub compressed_offset: u64,
     pub compressed_len: usize,
@@ -109,14 +111,191 @@ pub(crate) struct BgzfBlock {
     pub is_eof: bool,
 }
 
-/// Opens and decompresses one member at `compressed_offset` with a caller-
-/// owned libdeflate object that can be reused for an entire stream.
-pub(crate) fn read_block_at(
-    file: &mut File,
+/// One framed BGZF member awaiting decompression.
+pub(crate) struct CompressedBgzfBlock {
+    pub compressed_offset: u64,
+    pub bytes: Vec<u8>,
+    pub uncompressed_len: usize,
+    pub is_eof: bool,
+}
+
+struct WorkerJob {
+    sequence: usize,
+    member: CompressedBgzfBlock,
+}
+
+enum WorkerCommand {
+    Decompress(WorkerJob),
+    Stop,
+}
+
+pub(crate) struct CompletedBlock {
+    pub sequence: usize,
+    pub block: Result<BgzfBlock, BgzfError>,
+}
+
+struct WorkerResult {
+    worker: usize,
+    completed: CompletedBlock,
+}
+
+/// A persistent bounded worker set. At most one compressed member per worker
+/// can be in flight. Completed out-of-order blocks are retained only within
+/// the current outer batch, so memory is bounded by the configured batch cap
+/// plus O(`thread_count * 65536`) worker input/output bytes. Every worker
+/// constructs one libdeflate decompressor and reuses it until the pool drops.
+pub(crate) struct BgzfWorkerPool {
+    senders: Vec<SyncSender<WorkerCommand>>,
+    results: Receiver<WorkerResult>,
+    available: Vec<usize>,
+    in_flight: usize,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl BgzfWorkerPool {
+    pub fn new(thread_count: usize, path: &Path) -> Result<Self, BgzfError> {
+        if thread_count == 0 {
+            return Err(BgzfError::new(
+                "decompression thread count must be positive",
+            ));
+        }
+        let (result_sender, results) = mpsc::sync_channel(thread_count);
+        let mut senders = Vec::with_capacity(thread_count);
+        let mut handles = Vec::with_capacity(thread_count);
+        for worker in 0..thread_count {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let worker_results = result_sender.clone();
+            let worker_path = path.to_path_buf();
+            let handle = thread::Builder::new()
+                .name(format!("gpugeno-bgzf-{worker}"))
+                .spawn(move || worker_loop(worker, worker_path, receiver, worker_results))
+                .map_err(|error| {
+                    BgzfError::new(format!(
+                        "failed to start BGZF decompression worker {worker}: {error}"
+                    ))
+                })?;
+            senders.push(sender);
+            handles.push(handle);
+        }
+        drop(result_sender);
+        Ok(Self {
+            senders,
+            results,
+            available: (0..thread_count).rev().collect(),
+            in_flight: 0,
+            handles,
+        })
+    }
+
+    pub fn at_capacity(&self) -> bool {
+        self.available.is_empty()
+    }
+
+    pub fn has_in_flight(&self) -> bool {
+        self.in_flight != 0
+    }
+
+    pub fn submit(
+        &mut self,
+        sequence: usize,
+        member: CompressedBgzfBlock,
+    ) -> Result<(), BgzfError> {
+        let worker = self
+            .available
+            .pop()
+            .ok_or_else(|| BgzfError::new("internal BGZF worker capacity exceeded"))?;
+        self.senders[worker]
+            .send(WorkerCommand::Decompress(WorkerJob { sequence, member }))
+            .map_err(|_| BgzfError::new(format!("BGZF decompression worker {worker} stopped")))?;
+        self.in_flight += 1;
+        Ok(())
+    }
+
+    pub fn receive(&mut self) -> Result<CompletedBlock, BgzfError> {
+        let result = self
+            .results
+            .recv()
+            .map_err(|_| BgzfError::new("all BGZF decompression workers stopped unexpectedly"))?;
+        if result.worker >= self.senders.len() || self.in_flight == 0 {
+            return Err(BgzfError::new("internal invalid BGZF worker result"));
+        }
+        self.in_flight -= 1;
+        self.available.push(result.worker);
+        Ok(result.completed)
+    }
+}
+
+impl Drop for BgzfWorkerPool {
+    fn drop(&mut self) {
+        for sender in &self.senders {
+            let _ = sender.send(WorkerCommand::Stop);
+        }
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn worker_loop(
+    worker: usize,
+    path: PathBuf,
+    receiver: Receiver<WorkerCommand>,
+    results: SyncSender<WorkerResult>,
+) {
+    let mut decompressor = Decompressor::new();
+    while let Ok(command) = receiver.recv() {
+        let WorkerCommand::Decompress(job) = command else {
+            break;
+        };
+        let completed = CompletedBlock {
+            sequence: job.sequence,
+            block: decompress_member(&mut decompressor, &path, job.member),
+        };
+        if results.send(WorkerResult { worker, completed }).is_err() {
+            break;
+        }
+    }
+}
+
+fn decompress_member(
     decompressor: &mut Decompressor,
     path: &Path,
+    member: CompressedBgzfBlock,
+) -> Result<BgzfBlock, BgzfError> {
+    let mut data = vec![0u8; member.uncompressed_len];
+    let written = decompressor
+        .gzip_decompress(&member.bytes, &mut data)
+        .map_err(|error| {
+            BgzfError::at(
+                path,
+                member.compressed_offset,
+                format!("libdeflate gzip decompression failed: {error}"),
+            )
+        })?;
+    if written != member.uncompressed_len {
+        return Err(BgzfError::at(
+            path,
+            member.compressed_offset,
+            format!(
+                "libdeflate returned {written} bytes but the gzip trailer ISIZE is {}",
+                member.uncompressed_len
+            ),
+        ));
+    }
+    Ok(BgzfBlock {
+        compressed_offset: member.compressed_offset,
+        compressed_len: member.bytes.len(),
+        data,
+        is_eof: member.is_eof,
+    })
+}
+
+/// Frames one member at `compressed_offset` without decompressing it.
+pub(crate) fn read_compressed_block_at(
+    file: &mut File,
+    path: &Path,
     compressed_offset: u64,
-) -> Result<Option<BgzfBlock>, BgzfError> {
+) -> Result<Option<CompressedBgzfBlock>, BgzfError> {
     file.seek(SeekFrom::Start(compressed_offset))
         .map_err(|error| {
             BgzfError::at(
@@ -129,32 +308,26 @@ pub(crate) fn read_block_at(
         return Ok(None);
     };
     let is_eof = member.bytes == BGZF_EOF;
-    let mut data = vec![0u8; member.uncompressed_len];
-    let written = decompressor
-        .gzip_decompress(&member.bytes, &mut data)
-        .map_err(|error| {
-            BgzfError::at(
-                path,
-                compressed_offset,
-                format!("libdeflate gzip decompression failed: {error}"),
-            )
-        })?;
-    if written != member.uncompressed_len {
-        return Err(BgzfError::at(
-            path,
-            compressed_offset,
-            format!(
-                "libdeflate returned {written} bytes but the gzip trailer ISIZE is {}",
-                member.uncompressed_len
-            ),
-        ));
-    }
-    Ok(Some(BgzfBlock {
+    Ok(Some(CompressedBgzfBlock {
         compressed_offset,
-        compressed_len: member.bytes.len(),
-        data,
+        bytes: member.bytes,
+        uncompressed_len: member.uncompressed_len,
         is_eof,
     }))
+}
+
+/// Opens and decompresses one member at `compressed_offset` with a caller-
+/// owned libdeflate object that can be reused for an entire stream.
+pub(crate) fn read_block_at(
+    file: &mut File,
+    decompressor: &mut Decompressor,
+    path: &Path,
+    compressed_offset: u64,
+) -> Result<Option<BgzfBlock>, BgzfError> {
+    let Some(member) = read_compressed_block_at(file, path, compressed_offset)? else {
+        return Ok(None);
+    };
+    decompress_member(decompressor, path, member).map(Some)
 }
 
 /// Returns the physical endpoint of BAM data as a virtual offset. A canonical

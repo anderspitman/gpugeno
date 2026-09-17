@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const DEFAULT_BATCH_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_THREADS: usize = 8;
 
 fn main() -> ExitCode {
     match run() {
@@ -28,6 +29,7 @@ struct Args {
     backend: BackendChoice,
     device: i32,
     max_uncompressed_bytes: usize,
+    threads: usize,
     benchmark: bool,
     validate: bool,
 }
@@ -73,8 +75,13 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let metadata_time = metadata_start.elapsed();
 
-    let mut stream = DisjointBamStream::open(&args.input, anchors, args.max_uncompressed_bytes)
-        .map_err(|error| error.to_string())?;
+    let mut stream = DisjointBamStream::open(
+        &args.input,
+        anchors,
+        args.max_uncompressed_bytes,
+        args.threads,
+    )
+    .map_err(|error| error.to_string())?;
     let anchor_count = stream.anchor_count();
     let context = match args.backend {
         BackendChoice::Cuda => BackendContext::Cuda(
@@ -194,9 +201,10 @@ fn run() -> Result<(), String> {
     print!("{}", format_flagstat(&gpu_total));
     if args.benchmark {
         eprintln!(
-            "gpugeno benchmark: backend={} device={} batches={} spans={} anchors={} blocks_decompressed={} logical_bytes={} compressed_bytes_read={}",
+            "gpugeno benchmark: backend={} device={} threads={} batches={} spans={} anchors={} blocks_decompressed={} logical_bytes={} compressed_bytes_read={}",
             args.backend.name(),
             args.device,
+            args.threads,
             batches,
             spans,
             anchor_count,
@@ -234,6 +242,7 @@ fn parse_args() -> Result<Args, String> {
     let mut bai = None;
     let mut device = None;
     let mut max_uncompressed_bytes = None;
+    let mut threads = None;
     let mut backend = None;
     let mut benchmark = false;
     let mut validate = false;
@@ -276,6 +285,19 @@ fn parse_args() -> Result<Args, String> {
                 }
                 max_uncompressed_bytes = Some(parsed);
             }
+            "--threads" => {
+                let value = required_value(&mut raw, "--threads")?;
+                if threads.is_some() {
+                    return Err("--threads may be specified only once".to_string());
+                }
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("--threads is not a positive integer: {value}"))?;
+                if parsed == 0 {
+                    return Err("--threads must be greater than zero".to_string());
+                }
+                threads = Some(parsed);
+            }
             "--benchmark" => benchmark = true,
             "--validate" => validate = true,
             option if option.starts_with('-') => {
@@ -310,6 +332,7 @@ fn parse_args() -> Result<Args, String> {
         backend,
         device: device.unwrap_or(0),
         max_uncompressed_bytes: max_uncompressed_bytes.unwrap_or(DEFAULT_BATCH_BYTES),
+        threads: threads.unwrap_or(DEFAULT_THREADS),
         benchmark,
         validate,
     })
@@ -333,5 +356,5 @@ fn set_once(
 }
 
 fn usage() -> String {
-    "usage: gpugeno flagstat INPUT.bam [--backend cuda|wgpu] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--benchmark] [--validate]".to_string()
+    "usage: gpugeno flagstat INPUT.bam [--backend cuda|wgpu] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--threads N] [--benchmark] [--validate]".to_string()
 }

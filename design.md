@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** bounded parallel libdeflate decompression is approved and delegated to a fresh interactive Pi session. The public tuning option is `--threads N`; the experiment should measure scaling without combining it with pipeline overlap or GPU tuning.
+**Current phase:** the bounded parallel libdeflate experiment is complete. `--threads N` drives a persistent, bounded worker pool shared by CUDA and `wgpu`; evidence selected eight workers as the default. No following slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,11 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The approved task is bounded parallel BGZF/libdeflate decompression shared by CUDA and `wgpu`. Add `--threads N` (not the longer `--decompression-threads`) and preserve deterministic outer batches, member order, virtual-offset translation, logical bytes, spans, and counters. Use persistent workers with one reusable libdeflate decompressor per worker and bounded in-flight memory; retain a one-thread baseline. Measure representative scaling at useful counts such as 1, 2, 4, 8, and 16 on the 24-CPU development environment, then choose/document a default from evidence.
+The bounded parallel BGZF/libdeflate task is complete at the current checkpoint. The public `--threads N` option defaults to 8. The indexed stream owns persistent workers, each with one reused libdeflate decompressor; it permits at most one compressed member per worker and reorders completed members by deterministic sequence before exposing a batch. Both backends retained the exact 20 batches, 2,284 spans, 5,324,198,102 logical bytes, compressed-byte/block counts, and all flagstat counters at 1, 2, 4, 8, and 16 workers.
 
-Do not combine this experiment with CPU/GPU pipeline overlap, pinned memory, direct Vulkan, pileup, GPU kernel tuning, or the separate `wgpu` packing/staging optimization. Keep both backends and their validation paths operational.
+No next implementation slice is approved. Do not infer one. Plausible separate choices remain the `wgpu` packing/staging/resource-reuse bottleneck, optional CUDA packaging for non-NVIDIA deployment, actual non-NVIDIA validation, pipeline overlap, direct Vulkan, or pileup; the project owner must select the next bounded task.
 
-The first `wgpu` implementation has a separate major host-side inefficiency that must remain visible: its representative run spent roughly 4.6 seconds packing 5.3 GiB of BAM bytes into `u32` words and 2.2 seconds writing fresh staging buffers, versus about 0.46 seconds in the measured GPU stage. It also allocates per-batch resources. This is not WGSL kernel time and is a likely follow-up optimization after the shared decompression experiment.
+The first `wgpu` implementation still has a separate major host-side inefficiency: current representative runs spend roughly 3.7–3.8 seconds packing 5.3 GiB of BAM bytes and 1.9–2.1 seconds writing staging buffers, versus about 0.33–0.50 seconds in the measured GPU stage. It also allocates per-batch resources. This is not WGSL kernel time and was intentionally not changed by the decompression experiment.
 
 ## Purpose of this document
 
@@ -126,10 +126,10 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `src/main.rs`: explicit CUDA/`wgpu` `gpugeno flagstat` CLI and whole-file orchestration
 - `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
 - `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, staging/timestamps/readback, and the real portable compute classifier
-- `src/bgzf.rs`: validated BGZF framing, sequential libdeflate decompression, virtual offsets, and the earlier prefix diagnostic
+- `src/bgzf.rs`: validated BGZF framing, the sequential prefix diagnostic, virtual offsets, and persistent bounded libdeflate workers
 - `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
 - `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
-- `src/indexed_batch.rs`: bounded virtual-offset-to-byte translation and disjoint physical batch stream
+- `src/indexed_batch.rs`: deterministic bounded virtual-offset planning, parallel member decompression/reordering, and disjoint physical batch streaming
 - `cuda/gpugeno_cuda.h` and `cuda/gpugeno_cuda.cu`: public C ABI, reusable CUDA context/buffers, transfer/timing orchestration, and temporary vector-add/upload support
 - `cuda/flagstat.cuh` and `cuda/flagstat.cu`: internal launch declaration plus the flagstat classifier and bounded CUDA record-walk kernel
 - `examples/cuda_vector_add.rs` and `examples/bam_upload.rs`: temporary regression diagnostics
@@ -139,7 +139,7 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The completed flagstat slice is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The bounded parallel decompression experiment is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -199,13 +199,13 @@ cargo run --release --example bam_upload -- \
 cargo run --release -- flagstat \
   /agents/shadowfax/data/HG002_chr22.bam \
   --backend wgpu --device 0 \
-  --max-uncompressed-bytes 268435456 \
+  --max-uncompressed-bytes 268435456 --threads 8 \
   --benchmark --validate
 
 cargo run --release -- flagstat \
   /agents/shadowfax/data/HG002_chr22.bam \
   --backend cuda --device 0 \
-  --max-uncompressed-bytes 268435456 \
+  --max-uncompressed-bytes 268435456 --threads 8 \
   --benchmark --validate
 ```
 
@@ -228,7 +228,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Validate exact counters on `HG002_chr22.bam` against an independent host classifier.
 - [x] Implement and validate the native real-WGSL `wgpu` flagstat backend.
 - [x] Select bounded parallel libdeflate decompression as the next experiment.
-- [ ] Implement and benchmark `--threads N` with persistent bounded workers.
+- [x] Implement and benchmark `--threads N` with persistent bounded workers.
+- [ ] Select the next bounded slice; none is currently approved.
 
 ## Current decisions
 
@@ -246,7 +247,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** Initial input is a valid, seekable, coordinate-sorted BGZF-compressed BAM with a BAI index.
 - **Decided:** BAI only. CSI, SAM, CRAM, and non-seekable input are deferred.
 - **Decided:** Processing must be bounded-memory streaming; loading or decompressing the complete BAM is not acceptable.
-- **Decided:** Use libdeflate on CPU workers rather than implementing GPU BGZF decompression.
+- **Decided:** Use libdeflate on persistent CPU workers rather than implementing GPU BGZF decompression. `--threads N` controls the shared indexed stream, and the evidence-based default is 8.
+- **Decided:** Keep worker in-flight data bounded: at most one compressed member is assigned to each worker, while completed out-of-order data remains inside the bounded outer batch. Every worker owns and reuses exactly one decompressor for its lifetime.
 - **Decided:** Use record-aligned BAI virtual offsets to expose many independent GPU work spans. Do not begin with a CPU-generated offset for every BAM record.
 - **Working decision:** All GPU backends should receive deterministic, identical outer batches and spans. A backend may subdivide them internally.
 - **Decided:** Use a fixed 256 MiB default uncompressed batch cap and expose `--max-uncompressed-bytes`.
@@ -305,6 +307,7 @@ Current option decisions:
 - `--backend cuda|vulkan|wgpu`; default is now `wgpu`. Direct Vulkan remains unavailable and fails explicitly.
 - `--device`; one selected GPU per invocation, initially defaulting to device 0.
 - `--max-uncompressed-bytes`; both paths share the 256 MiB default.
+- `--threads N`; positive decompression-worker count, default 8.
 - `--benchmark`; timing output is opt-in.
 
 An explicitly requested unavailable backend must fail clearly. It must never silently fall back to another backend, because that would invalidate comparisons.
@@ -494,7 +497,7 @@ The host path is deliberately layered for future pileup:
 
 1. `bai.rs` retains every nonzero linear-index entry as `(coordinate, virtual_offset)`, including repeated offsets. It separately derives a sorted/deduplicated physical flagstat view.
 2. BAM header parsing supplies an explicit first-record anchor. The BGZF EOF location supplies an explicit physical end anchor, covering header-adjacent and trailing unindexed records.
-3. `DisjointBamStream` reads/decompresses only one bounded batch at a time with one persistent libdeflate decompressor. An interior boundary member can be decompressed by both adjacent batches, but retained bytes are sliced into disjoint logical ranges.
+3. `DisjointBamStream` reads/framing-plans one bounded batch at a time and sends its BGZF members through persistent bounded libdeflate workers. Results are reassembled in member sequence before exposure. An interior boundary member can be decompressed by both adjacent batches, but retained bytes are sliced into disjoint logical ranges.
 4. Every batch retains a BGZF-member map and can translate retained virtual offsets into 32-bit batch-relative positions. This is intended to support a later pileup planner without forcing pileup to use flagstat's deduplicated/disjoint work semantics.
 5. The CUDA call uploads bytes plus span starts, launches one 128-thread block per physical span, reads one 32-counter result per span, and reduces those partials on the host.
 
@@ -597,8 +600,7 @@ During the 9.07-second command, 134 of 138 samples reported nonzero GPU utilizat
 - Exact coverage is demonstrated for `HG002_chr22.bam`, not every valid sparse or unusual BAI. Oversized anchor gaps currently fail clearly.
 - The host oracle is a separate Rust implementation, but there is no external samtools result yet.
 - The shared index and BGZF mapping preserve what pileup needs, but pileup still needs an explicit policy for left-overlapping reads, right-side data extent, and a completion signal such as the status used by current CuBayes prescan/pileup.
-- Sequential processing has one live host batch and reusable device buffers but no worker pool, bounded channel, double buffering, or CPU/GPU overlap yet.
-- Boundary members are intentionally reread for simplicity. A future scheduler may retain them between batches.
+- Batch construction now uses a bounded persistent worker pool but remains stage-sequential with GPU execution: there is no double buffering or CPU/GPU overlap. Boundary members are intentionally reread for simplicity.
 
 ## Completed native `wgpu` whole-file flagstat vertical slice
 
@@ -666,6 +668,87 @@ The immediately following CUDA regression run produced identical counters and co
 - Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
 - The prototype creates device/staging/readback buffers per batch and performs a full byte-to-word packing pass. Reuse, direct mapped packing, and pipeline overlap are intentionally deferred.
 - As before, representative correctness does not imply production handling of every malformed BAM or pathological BAI.
+
+## Completed bounded parallel libdeflate experiment
+
+### Implementation and bounds
+
+`gpugeno flagstat` now accepts public `--threads N`; zero and non-integer values fail clearly, and the evidence-selected default is 8. `DisjointBamStream` constructs one worker pool when opened and retains it across all outer batches. Each named OS worker constructs one `libdeflater::Decompressor`, reuses it for every assigned BGZF member, and exits when the stream drops.
+
+The coordinator still performs BGZF framing and virtual-offset planning in compressed-file order. It assigns at most one member to each available worker. Per-worker input queues have capacity one, the shared completion queue has capacity `N`, and scheduling never has more than `N` members in flight. Results carry deterministic member sequence numbers; the coordinator stores out-of-order completions only inside the current outer batch and appends them in sequence. Thus the memory envelope remains the configured outer batch (plus vector capacity and bounded `O(N * 65536)` worker input/output), rather than an unbounded job or result backlog. No worker runs concurrently with backend processing of the previous batch: pipeline overlap was not added.
+
+Framing was split from decompression without changing validation: the coordinator still validates complete gzip/BGZF headers, `BC`/`BSIZE`, bounds, trailer `ISIZE`, and EOF behavior, while every worker sends the complete member through libdeflate's gzip decoder for integrity/CRC checking. The one-thread setting uses the same worker/reordering path and is the baseline rather than a separate sequential implementation. A synthetic regression compares one and four workers and requires byte data, spans, virtual endpoints, block maps, decompressed-block counts, and compressed-byte counts to match exactly. Additional tests cover zero-worker rejection and a worker-side libdeflate integrity error with clean shutdown; the complete suite has 18 tests.
+
+### Representative benchmark and default
+
+Measured on 2026-09-15 on the documented 24-CPU, RTX 3060 development host with the 256 MiB outer cap. The CUDA scaling command was run three times per count without host validation; the table reports medians and the complete observed `batch_build` range. Output from every run was byte-compared. `batch_build` includes serial framing/planning, worker decompression, ordering, and batch assembly; it is not pure libdeflate CPU time.
+
+```bash
+for threads in 1 2 4 8 16; do
+  for run in 1 2 3; do
+    target/release/gpugeno flagstat /agents/shadowfax/data/HG002_chr22.bam \
+      --backend cuda --device 0 --max-uncompressed-bytes 268435456 \
+      --threads "$threads" --benchmark
+  done
+done
+```
+
+| threads | median batch build (ms) | observed range (ms) | median wall (ms) | speedup in batch build vs 1 |
+|---:|---:|---:|---:|---:|
+| 1 | 7,855.456 | 7,684.294–8,103.806 | 8,453.127 | 1.00x |
+| 2 | 4,253.306 | 4,203.895–4,348.457 | 4,819.814 | 1.85x |
+| 4 | 2,594.613 | 2,587.489–2,622.137 | 3,173.895 | 3.03x |
+| 8 | 1,781.002 | 1,705.099–1,835.169 | 2,375.257 | 4.41x |
+| 16 | 1,763.352 | 1,757.441–1,800.883 | 2,342.313 | 4.45x |
+
+Eight is the default: it cuts median batch construction by 77.3% versus one worker and reaches 99.0% of the 16-worker median throughput while using half as many workers. Sixteen workers improved the CUDA median by only 17.650 ms (1.0%), well below a useful default tradeoff and consistent with serial framing/assembly and scheduling becoming limiting.
+
+Each `wgpu` count was also run once with `--benchmark --validate`. This is corroborating backend/correctness evidence, not a stable timing distribution:
+
+| threads | batch build (ms) | wall (ms) | host validation |
+|---:|---:|---:|:---|
+| 1 | 8,575.292 | 18,680.318 | exact match |
+| 2 | 4,424.127 | 14,209.735 | exact match |
+| 4 | 2,605.307 | 12,592.374 | exact match |
+| 8 | 1,799.249 | 11,511.666 | exact match |
+| 16 | 1,842.368 | 11,785.995 | exact match |
+
+All ten representative thread/backend combinations emitted the same 16-line output. Every run retained exactly 20 batches, 2,284 spans from 2,285 anchors, 82,360 decompressed members, 5,324,198,102 logical alignment bytes, and 1,645,336,143 compressed bytes read. Each validated `wgpu` run matched all 32 host-oracle counters; the explicit CUDA one-thread validation also matched. This demonstrates that worker completion order does not affect batches, virtual mappings, spans, bytes, or counters. Current `wgpu` host packing remained 3,722.703–3,808.510 ms and staging writes 1,935.667–2,057.679 ms across those runs; this task did not optimize or hide them.
+
+### Verification and remaining risks
+
+The completed verification commands were:
+
+```bash
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+git diff --check
+
+cargo run --release --example cuda_vector_add -- --device 0 --elements 1048576
+cargo run --release --example bam_upload -- \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --device 0 --max-uncompressed-bytes 4194304
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+```
+
+Risks and limits:
+
+- Scaling plateaus between 8 and 16 workers on this host. Framing, ordered concatenation, per-member channels, allocation, and storage are still serial/coordinator costs; this experiment does not isolate them as pure decompression timing.
+- The static default of 8 may oversubscribe a smaller machine. `--threads` is the deliberate tuning escape hatch; no topology-aware policy was added from evidence on only one host.
+- The one-worker path includes OS-thread/channel/reordering overhead and is a common-path baseline, not a promise to equal the old direct sequential implementation's timing.
+- Out-of-order outputs are bounded by the outer batch, but `Vec` capacity can exceed logical bytes according to Rust's growth policy. The queue/job envelope itself is strictly bounded by worker count.
+- Worker shutdown joins all threads. Normal, decoder-error, oversized-span, and representative paths terminate, but forced cancellation of a hypothetical stuck native libdeflate call is not implemented.
+- This does not change the existing unusual-BAI, external-samtools, non-NVIDIA, or CUDA-packaging risks. It also deliberately does not overlap CPU and GPU stages or alter `wgpu` packing/staging, GPU kernels, pileup, or reference repositories.
 
 ## Superseded candidate: GPU per-block byte sums
 
@@ -897,6 +980,12 @@ The selected portability slice succeeded without changing the indexed stream: th
 
 The experiment also disproved any assumption that portable byte-addressing and reduction would be free host work. Packing 5.3 GiB of BAM bytes into WGSL-readable words and writing fresh staging buffers consumed several seconds, all now reported explicitly. Reuse/direct packing are optimization candidates, not correctness changes. CPU/software adapters are visible in enumeration (llvmpipe was adapter 3) and must be rejected to keep backend claims honest.
 
+### Parallel libdeflate outcome
+
+The shared indexed stream now uses deterministic parallel member decompression rather than one direct decompressor. Separating framing/planning from inflation allowed the coordinator to enforce the same virtual-offset boundaries before worker completion, while sequence-tagged results preserved member order and every observable batch property. A bounded one-job-per-worker scheduler was sufficient; pipeline overlap was not needed to expose decompression scaling.
+
+On the representative 24-CPU host, median CUDA batch construction fell from 7.855 seconds with one worker to 1.781 seconds with eight. Sixteen workers reached only 1.763 seconds, so eight became the default rather than spending twice the workers for about 1% further improvement. The `wgpu` checks showed the same decompression trend and exact counters, while its separate packing/staging costs remained visible and dominant after decompression sped up.
+
 ### CuBayes actor implementation is not authoritative
 
 The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
@@ -926,7 +1015,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that both CUDA and native `wgpu` flagstat slices are complete, plausible later experiments include an actual non-NVIDIA validation run, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, direct Vulkan flagstat, CUDA/`wgpu` batch tuning, or returning to pileup. The currently approved parallel-libdeflate task is the only committed next slice.
+Now that CUDA, native `wgpu`, and bounded parallel decompression slices are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, focused `wgpu` packing/staging reuse, a pileup overlap/completion prototype, direct Vulkan flagstat, or backend tuning. None is an approved next slice; the project owner must choose one before implementation.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -938,4 +1027,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate approved task
 
-Implement and benchmark the bounded parallel-libdeflate worker path described in **Current handoff**. The task succeeds when `--threads N` controls real concurrent BGZF decompression, one-thread and parallel runs produce identical representative bytes/spans/counters on both backends, thread-count scaling is recorded, all verification passes, and the implementation plus `design.md` are committed with a clean tree. At completion, state explicitly that no following slice is approved unless the project owner selects one.
+No next slice is approved. The bounded parallel-libdeflate experiment is complete; stop here until the project owner selects a new bounded task.
