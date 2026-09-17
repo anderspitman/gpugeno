@@ -4,6 +4,7 @@ use gpugeno::bam::{
 };
 use gpugeno::bgzf::data_end_virtual_offset;
 use gpugeno::indexed_batch::DisjointBamStream;
+use gpugeno::wgpu_backend::WgpuContext;
 use gpugeno::CudaContext;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,10 +25,31 @@ fn main() -> ExitCode {
 struct Args {
     input: PathBuf,
     bai: Option<PathBuf>,
+    backend: BackendChoice,
     device: i32,
     max_uncompressed_bytes: usize,
     benchmark: bool,
     validate: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BackendChoice {
+    Cuda,
+    Wgpu,
+}
+
+impl BackendChoice {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::Wgpu => "wgpu",
+        }
+    }
+}
+
+enum BackendContext {
+    Cuda(CudaContext),
+    Wgpu(Box<WgpuContext>),
 }
 
 fn run() -> Result<(), String> {
@@ -54,7 +76,28 @@ fn run() -> Result<(), String> {
     let mut stream = DisjointBamStream::open(&args.input, anchors, args.max_uncompressed_bytes)
         .map_err(|error| error.to_string())?;
     let anchor_count = stream.anchor_count();
-    let context = CudaContext::create(args.device).map_err(|error| error.to_string())?;
+    let context = match args.backend {
+        BackendChoice::Cuda => BackendContext::Cuda(
+            CudaContext::create(args.device).map_err(|error| error.to_string())?,
+        ),
+        BackendChoice::Wgpu => {
+            let adapter_index = u32::try_from(args.device)
+                .map_err(|_| "--device must be nonnegative for wgpu".to_string())?;
+            let context = WgpuContext::create(adapter_index).map_err(|error| error.to_string())?;
+            let info = context.adapter_info();
+            eprintln!(
+                "gpugeno wgpu: adapter_index={} name={:?} api={:?} device_type={:?} driver={:?} driver_info={:?} timing_source={}",
+                info.index,
+                info.name,
+                info.api,
+                info.device_type,
+                info.driver,
+                info.driver_info,
+                context.timing_source()
+            );
+            BackendContext::Wgpu(Box::new(context))
+        }
+    };
 
     let mut gpu_total = FlagstatCounters::default();
     let mut host_total = FlagstatCounters::default();
@@ -67,6 +110,9 @@ fn run() -> Result<(), String> {
     let mut h2d_ms = 0.0f64;
     let mut kernel_ms = 0.0f64;
     let mut d2h_ms = 0.0f64;
+    let mut packing_ms = 0.0f64;
+    let mut staging_ms = 0.0f64;
+    let mut setup_ms = 0.0f64;
     let mut host_validation_ms = 0.0f64;
 
     while let Some(batch) = stream.next_batch().map_err(|error| error.to_string())? {
@@ -83,17 +129,46 @@ fn run() -> Result<(), String> {
             host_total.add_assign(&batch_host);
         }
 
-        let result = context
-            .flagstat(&batch.data, &batch.span_starts)
-            .map_err(|error| {
-                format!(
-                    "CUDA flagstat failed for virtual range {}..{}: {error}",
-                    batch.virtual_start.raw(),
-                    batch.virtual_end.raw()
-                )
-            })?;
-        for partial in &result.span_counts {
-            gpu_total.add_assign(partial);
+        match &context {
+            BackendContext::Cuda(context) => {
+                let result =
+                    context
+                        .flagstat(&batch.data, &batch.span_starts)
+                        .map_err(|error| {
+                            format!(
+                                "CUDA flagstat failed for virtual range {}..{}: {error}",
+                                batch.virtual_start.raw(),
+                                batch.virtual_end.raw()
+                            )
+                        })?;
+                for partial in &result.span_counts {
+                    gpu_total.add_assign(partial);
+                }
+                h2d_ms += f64::from(result.timings.h2d_ms);
+                kernel_ms += f64::from(result.timings.kernel_ms);
+                d2h_ms += f64::from(result.timings.d2h_ms);
+            }
+            BackendContext::Wgpu(context) => {
+                let result =
+                    context
+                        .flagstat(&batch.data, &batch.span_starts)
+                        .map_err(|error| {
+                            format!(
+                                "wgpu flagstat failed for virtual range {}..{}: {error}",
+                                batch.virtual_start.raw(),
+                                batch.virtual_end.raw()
+                            )
+                        })?;
+                for partial in &result.span_counts {
+                    gpu_total.add_assign(partial);
+                }
+                packing_ms += result.timings.packing_ms;
+                staging_ms += result.timings.staging_ms;
+                setup_ms += result.timings.setup_ms;
+                h2d_ms += result.timings.h2d_ms;
+                kernel_ms += result.timings.kernel_ms;
+                d2h_ms += result.timings.d2h_ms;
+            }
         }
 
         batches += 1;
@@ -102,9 +177,6 @@ fn run() -> Result<(), String> {
         logical_bytes += batch.data.len() as u64;
         compressed_bytes_read += batch.compressed_bytes_read;
         batch_build_ms += batch.build_time.as_secs_f64() * 1000.0;
-        h2d_ms += f64::from(result.timings.h2d_ms);
-        kernel_ms += f64::from(result.timings.kernel_ms);
-        d2h_ms += f64::from(result.timings.d2h_ms);
     }
 
     if spans + 1 != anchor_count as u64 {
@@ -114,14 +186,16 @@ fn run() -> Result<(), String> {
     }
     if args.validate && gpu_total != host_total {
         return Err(format!(
-            "CUDA flagstat counters disagree with the host oracle\nCUDA: {gpu_total:#?}\nhost: {host_total:#?}"
+            "{} flagstat counters disagree with the host oracle\nGPU: {gpu_total:#?}\nhost: {host_total:#?}",
+            args.backend.name()
         ));
     }
 
     print!("{}", format_flagstat(&gpu_total));
     if args.benchmark {
         eprintln!(
-            "gpugeno benchmark: backend=cuda device={} batches={} spans={} anchors={} blocks_decompressed={} logical_bytes={} compressed_bytes_read={}",
+            "gpugeno benchmark: backend={} device={} batches={} spans={} anchors={} blocks_decompressed={} logical_bytes={} compressed_bytes_read={}",
+            args.backend.name(),
             args.device,
             batches,
             spans,
@@ -136,6 +210,11 @@ fn run() -> Result<(), String> {
             h2d_ms + kernel_ms + d2h_ms,
             wall_start.elapsed().as_secs_f64() * 1000.0
         );
+        if matches!(args.backend, BackendChoice::Wgpu) {
+            eprintln!(
+                "gpugeno benchmark: wgpu_host_packing={packing_ms:.3} ms wgpu_staging_write={staging_ms:.3} ms wgpu_resource_setup={setup_ms:.3} ms"
+            );
+        }
         if args.validate {
             eprintln!(
                 "gpugeno benchmark: host_validation={host_validation_ms:.3} ms result=exact-match"
@@ -210,16 +289,25 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
-    let backend = backend.unwrap_or_else(|| "cuda".to_string());
-    if backend != "cuda" {
-        return Err(format!(
-            "backend {backend:?} is unavailable; this vertical slice supports only cuda"
-        ));
-    }
+    let backend =
+        match backend.as_deref().unwrap_or("wgpu") {
+            "cuda" => BackendChoice::Cuda,
+            "wgpu" => BackendChoice::Wgpu,
+            "vulkan" => return Err(
+                "backend \"vulkan\" is unavailable; direct Vulkan is not implemented (no fallback)"
+                    .to_string(),
+            ),
+            value => {
+                return Err(format!(
+                    "unsupported backend {value:?}; expected cuda, vulkan, or wgpu"
+                ));
+            }
+        };
 
     Ok(Args {
         input: input.ok_or_else(usage)?,
         bai,
+        backend,
         device: device.unwrap_or(0),
         max_uncompressed_bytes: max_uncompressed_bytes.unwrap_or(DEFAULT_BATCH_BYTES),
         benchmark,
@@ -245,5 +333,5 @@ fn set_once(
 }
 
 fn usage() -> String {
-    "usage: gpugeno flagstat INPUT.bam [--backend cuda] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--benchmark] [--validate]".to_string()
+    "usage: gpugeno flagstat INPUT.bam [--backend cuda|wgpu] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--benchmark] [--validate]".to_string()
 }

@@ -5,4 +5,7 @@ edition = "2021"
 description = "Streaming GPU implementations of operations over indexed BAM data"
 
 [dependencies]
+bytemuck = "1.25.0"
 libdeflater = "1.26.0"
+pollster = "0.4.0"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "gles", "vulkan", "wgsl"] }

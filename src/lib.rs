@@ -9,6 +9,7 @@ pub mod bai;
 pub mod bam;
 pub mod bgzf;
 pub mod indexed_batch;
+pub mod wgpu_backend;
 
 use bam::FlagstatCounters;
 

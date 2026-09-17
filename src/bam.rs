@@ -207,6 +207,17 @@ impl FlagstatCounters {
         }
     }
 
+    /// Widens one portable GPU span's 32 `u32` partial counters into the
+    /// common host representation.
+    pub(crate) fn from_u32_flat(values: &[u32]) -> Self {
+        assert_eq!(values.len(), 32);
+        let mut counters = Self::default();
+        for (destination, &source) in counters.as_mut_flat().iter_mut().zip(values) {
+            *destination = u64::from(source);
+        }
+        counters
+    }
+
     fn as_flat(&self) -> &[u64; 32] {
         // The repr(C) structure consists solely of 16 adjacent [u64; 2]
         // fields. This assertion and cast centralize the layout dependency.

@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** a native `wgpu` flagstat backend is approved and delegated to a fresh interactive Pi session. It should reuse the existing bounded indexed BAM stream, execute a real WGSL classifier, and provide the first non-CUDA backend evidence.
+**Current phase:** the native `wgpu` flagstat vertical slice is complete. CUDA and real WGSL paths now share the bounded indexed BAM stream and agree exactly on the representative BAM. No next slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,11 +41,9 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The approved task is a native `wgpu` flagstat vertical slice. Reuse the immutable decompressed batches and span starts; add explicit `--backend wgpu` execution with a real WGSL compute kernel, adapter/API reporting, exact comparison to the existing representative counters, and honest upload/kernel/readback measurements. Keep CUDA working and never silently fall back between backends.
+The native `wgpu` flagstat slice is complete and committed together with its evidence. `--backend wgpu` selects exactly one enumerated hardware adapter, reports its identity and underlying API, executes `src/flagstat.wgsl`, and never falls back to CUDA or a CPU/software adapter. The established CUDA path remains operational.
 
-Use portable bounded per-span `u32` partial counters followed by host `u64` reduction if required by WGSL portability. Any byte packing or host-timed fallback must be measured/labeled rather than hidden. The implementation may prioritize the canonical BAM and targeted fixtures over production-grade malformed/pathological input behavior.
-
-Explicit non-goals for this slice: direct Vulkan, pileup, browser execution, parallel decompression, CPU/GPU pipeline overlap, CUDA tuning, and obtaining non-NVIDIA hardware. A later run on actual non-NVIDIA hardware is still required for the full proposal claim.
+No next slice is approved. A future agent must present evidence-based options and ask the project owner before implementing another slice. Plausible choices remain an actual non-NVIDIA validation run, direct Vulkan, parallel decompression/pipeline overlap, or the first focused pileup experiment; none should be inferred as selected.
 
 ## Purpose of this document
 
@@ -119,12 +117,13 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 
 ### Repository
 
-The root now contains a bounded streaming Rust/CUDA flagstat prototype:
+The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 
 - `Cargo.toml` and `Cargo.lock`
 - `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
-- `src/main.rs`: CUDA-only `gpugeno flagstat` CLI and whole-file orchestration
+- `src/main.rs`: explicit CUDA/`wgpu` `gpugeno flagstat` CLI and whole-file orchestration
 - `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
+- `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, staging/timestamps/readback, and the real portable compute classifier
 - `src/bgzf.rs`: validated BGZF framing, sequential libdeflate decompression, virtual offsets, and the earlier prefix diagnostic
 - `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
 - `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
@@ -197,12 +196,18 @@ cargo run --release --example bam_upload -- \
 
 cargo run --release -- flagstat \
   /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 \
+  --max-uncompressed-bytes 268435456 \
+  --benchmark --validate
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
   --backend cuda --device 0 \
   --max-uncompressed-bytes 268435456 \
   --benchmark --validate
 ```
 
-All commands passed at the current checkpoint. `gpugeno flagstat` is the first functional CLI path; the examples remain temporary diagnostics.
+All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `wgpu`; both supported backends can be selected explicitly. The examples remain temporary CUDA regression diagnostics.
 
 ### Progress
 
@@ -219,7 +224,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` is the first f
 - [x] Decide the next experiment from its results: a CUDA-only whole-file flagstat streaming vertical slice.
 - [x] Implement the reusable indexed bounded-batch layer and CUDA flagstat path.
 - [x] Validate exact counters on `HG002_chr22.bam` against an independent host classifier.
-- [ ] Select the next experiment from the completed flagstat evidence.
+- [x] Implement and validate the native real-WGSL `wgpu` flagstat backend.
+- [ ] Select the next experiment from the completed cross-API evidence; none is currently approved.
 
 ## Current decisions
 
@@ -254,6 +260,16 @@ All commands passed at the current checkpoint. `gpugeno flagstat` is the first f
 - **Decided:** Validate the real CUDA totals against a small independent Rust classifier used as an oracle, not exposed as a public CPU backend.
 - **Explicit non-goals:** parallel libdeflate workers, pinned memory, pipeline overlap, Vulkan, `wgpu`, multi-GPU, CSI/SAM/CRAM, pileup itself, and performance tuning beyond stage timings.
 
+### Completed native `wgpu` flagstat vertical slice
+
+- **Decided:** `wgpu` is now the default, while `--backend cuda` and `--backend wgpu` remain explicit. Direct `--backend vulkan` fails clearly because it is not implemented; no selector silently changes backend.
+- **Decided:** Numeric `--device` means the index in `wgpu`'s enumerated adapter list for the `wgpu` backend. The selected adapter name, underlying API, device type, driver, and timing source are always reported on `stderr`.
+- **Decided:** Reject adapters reported as CPU devices. This prevents an explicit GPU backend request from quietly becoming llvmpipe or another software implementation.
+- **Decided:** Pack arbitrary BAM bytes into little-endian `u32` words for portable WGSL storage access. Report packing, staging writes, and per-batch resource setup separately rather than folding them into transfer or kernel time.
+- **Decided:** The WGSL kernel uses one 128-lane workgroup per existing span, a bounded shared record-offset table, workgroup atomic `u32` counters, and one 32-counter partial per span. The host widens and reduces partials into the common `u64` counters.
+- **Decided:** When both required timestamp features exist, H2D copies, the compute pass, and D2H copies use GPU timestamps. Otherwise the same three stages are separately submitted, synchronized, host-timed, and labeled `host-synchronized`.
+- **Explicit non-goals:** direct Vulkan, pileup, browser execution, parallel decompression, pipeline overlap, CUDA tuning, and acquiring non-NVIDIA hardware.
+
 ### Completed first vertical slice boundaries
 
 - **Decided:** Process only one bounded prefix batch, not the entire BAM.
@@ -282,14 +298,14 @@ gpugeno flagstat INPUT.bam [OPTIONS]
 
 Current option decisions:
 
-- `--backend cuda|vulkan|wgpu`; target default is `wgpu` once that backend exists.
+- `--backend cuda|vulkan|wgpu`; default is now `wgpu`. Direct Vulkan remains unavailable and fails explicitly.
 - `--device`; one selected GPU per invocation, initially defaulting to device 0.
-- `--max-uncompressed-bytes`; the current CUDA path defaults to 256 MiB.
+- `--max-uncompressed-bytes`; both paths share the 256 MiB default.
 - `--benchmark`; timing output is opt-in.
 
 An explicitly requested unavailable backend must fail clearly. It must never silently fall back to another backend, because that would invalidate comparisons.
 
-During a CUDA-only flagstat stage, requiring `--backend cuda` would be acceptable even though the eventual default is `wgpu`.
+The CUDA and `wgpu` flagstat stages are both available. Explicit selection is retained for reproducible comparisons even though omitted `--backend` now selects `wgpu`.
 
 ### Platform and devices
 
@@ -580,6 +596,72 @@ During the 9.07-second command, 134 of 138 samples reported nonzero GPU utilizat
 - Sequential processing has one live host batch and reusable device buffers but no worker pool, bounded channel, double buffering, or CPU/GPU overlap yet.
 - Boundary members are intentionally reread for simplicity. A future scheduler may retain them between batches.
 
+## Completed native `wgpu` whole-file flagstat vertical slice
+
+### Implementation
+
+`wgpu` 30.0.1 now owns a native adapter, device, queue, and compiled WGSL compute pipeline in Rust. The CLI defaults to `wgpu` and retains explicit `--backend cuda`; requesting the unimplemented direct `vulkan` backend fails without fallback. For `wgpu`, `--device N` selects exactly adapter `N` from `Instance::enumerate_adapters(Backends::all())`. CPU adapters are rejected, and an unavailable index reports the complete enumerated adapter list. Adapter name, underlying API, device type, driver, and timing source are printed to `stderr` without contaminating flagstat `stdout`.
+
+The backend consumes the existing immutable `IndexedBamBatch::data` and `span_starts` directly. Host code packs arbitrary BAM bytes into little-endian `u32` words because portable WGSL storage arrays do not expose byte elements. The real shader in `src/flagstat.wgsl` uses byte extraction from those words, one 128-lane workgroup per existing physical span, a 128-entry workgroup record table built by lane 0, bounds checks before fixed-field reads, and 32 workgroup atomic `u32` counters. Each span writes one partial; Rust checks every shader status, widens partials, and reduces into the shared `u64` `FlagstatCounters`. The bounded 256 MiB default means a partial cannot approach `u32` overflow on valid minimum-sized BAM records.
+
+Timing is explicit. On adapters with both `TIMESTAMP_QUERY` and `TIMESTAMP_QUERY_INSIDE_ENCODERS`, six GPU timestamps delimit staging-to-device copies, the compute pass, and device-to-map-visible readback copies. On other adapters, those stages use separate submit/wait intervals and are labeled `host-synchronized`, not represented as GPU timestamps. CPU byte packing, mapped staging-buffer writes, and per-batch resource/binding setup are reported separately. These setup costs are intentionally not hidden inside H2D or kernel numbers.
+
+Two new tests cover byte packing and actual WGSL execution over representative flags, two physical spans, all 32 counters, and a malformed final record status. The GPU result is compared exactly with the independent host classifier. The complete suite now has 16 tests.
+
+### Verification and representative evidence
+
+Verified on 2026-09-15:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+git diff --check
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 \
+  --max-uncompressed-bytes 268435456 \
+  --benchmark --validate
+
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 \
+  --max-uncompressed-bytes 268435456 \
+  --benchmark --validate
+
+cmp /tmp/gpugeno-wgpu-256.out /tmp/gpugeno-cuda-regression.out
+```
+
+All passed. The `wgpu` run selected adapter 0, `NVIDIA GeForce RTX 3060`, reported `api=Vulkan`, `device_type=DiscreteGpu`, NVIDIA driver `550.163.01`, and `timing_source=gpu-timestamps`. It processed the same 20 batches, 2,284 spans, 5,324,198,102 logical alignment bytes, and 1,645,336,143 compressed bytes read as CUDA. `--validate` found all 32 counters equal to the host oracle, and the full 16-line output was byte-identical to the CUDA run. This proves a real non-CUDA software/API path on the representative workload; because the physical GPU was still NVIDIA, it does not yet prove the proposal's non-NVIDIA hardware claim.
+
+Explicit failure checks also passed: `--backend vulkan` reported that direct Vulkan is unavailable with no fallback, `--backend wgpu --device 99` listed the five enumerated adapters and failed, and selecting adapter 3 (`llvmpipe`, `DeviceType::Cpu`) was rejected as a software fallback.
+
+### Smoke measurements
+
+The representative 256 MiB `wgpu` run reported the following single-run smoke data, not stable benchmark results:
+
+```text
+batches=20 spans=2,284 blocks_decompressed=82,360
+logical_bytes=5,324,198,102 compressed_bytes_read=1,645,336,143
+metadata=0.459 ms batch_build=7,520.867 ms
+GPU-timestamp H2D=304.395 ms kernel=137.716 ms D2H=0.269 ms GPU_stage=442.380 ms
+host packing=4,664.635 ms staging writes=2,133.792 ms resource setup=124.040 ms
+host validation=890.541 ms wall=18,986.954 ms
+```
+
+The immediately following CUDA regression run produced identical counters and coverage with CUDA-event H2D 404.244 ms, kernel 81.633 ms, and D2H 0.459 ms. This is regression and smoke evidence, not a fair final API benchmark: the first portable implementation allocates resources per batch and its deliberately reported packing/staging work makes its wall time much larger. The existing shared batch policy remains unchanged.
+
+### Remaining `wgpu` risks
+
+- Actual non-NVIDIA hardware is still required. The observed Vulkan-on-NVIDIA path only establishes that CUDA is not being called.
+- The default test suite now executes a small real `wgpu` dispatch and therefore requires at least one hardware adapter at enumerated index 0 in addition to the project's existing CUDA build-tool requirement.
+- Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
+- The prototype creates device/staging/readback buffers per batch and performs a full byte-to-word packing pass. Reuse, direct mapped packing, and pipeline overlap are intentionally deferred.
+- As before, representative correctness does not imply production handling of every malformed BAM or pathological BAI.
+
 ## Superseded candidate: GPU per-block byte sums
 
 This candidate was not implemented. The project owner selected the more ambitious whole-file flagstat slice instead.
@@ -713,20 +795,18 @@ The duplicate traversal is acceptable because it avoids a serial host pass that 
 - Deduplicate or otherwise handle repeated BAI offsets without dropping data.
 - Add explicit start/end coverage so records before the first useful index anchor and unindexed trailing records are included.
 - Keep batches below the offset range required by future Vulkan/`wgpu` implementations; 32-bit batch-relative offsets are the likely portable denominator.
-- Reduce final totals into host `u64` counters. WebGPU's portable integer/atomic constraints may require bounded 32-bit partial counters later; this has not yet been validated.
+- Reduce final totals into host `u64` counters. The completed `wgpu` path uses bounded per-span 32-bit atomic partials and widens them during host reduction.
 
-### Important unproven assumptions
+### Historical work-discovery assumptions and outcomes
 
-These are hypotheses to test during an eventual flagstat experiment, not settled facts:
+These were hypotheses before the whole-file CUDA and `wgpu` experiments. Their current outcomes are noted explicitly:
 
-1. BAI supplies enough distinct record-aligned anchors on the representative BAM to keep the GPU occupied.
-2. The chosen anchors can partition the entire physical record stream exactly once, including long unindexed tails.
-3. Sparse or repeated BAI intervals can be handled without needing a normal-case serial host record scan.
-4. Duplicate traversal in the reference algorithm performs well enough to be a useful baseline.
-5. CPU libdeflate and transfer can feed the flagstat kernel fast enough for kernel differences to be measurable.
-6. Rust plus a CUDA C ABI is less costly than hosting all three APIs from C/C++.
-
-If an assumption fails, record the evidence here before replacing the design.
+1. **Observed on the representative BAM:** BAI supplied 2,285 physical anchors and 2,284 spans, enough to occupy both kernels.
+2. **Observed on the representative BAM:** explicit first/end anchors partitioned all 5,324,198,102 alignment-stream bytes exactly once, including the tail.
+3. **Still unproven generally:** sparse or repeated BAI intervals may expose a span larger than the configured cap; the current path reports an error rather than scanning or skipping.
+4. **Superseded implementation idea:** neither backend uses the old reference's duplicate `nth_read` traversal; both use a bounded lane-0 record-offset table.
+5. **Observed:** CPU libdeflate and transfers feed measurable kernels, although sequential batch construction dominates and `wgpu` packing/staging adds substantial host work.
+6. **Not directly evaluated:** the Rust host plus CUDA C ABI worked, and native Rust `wgpu` integrated cleanly, but no all-C/C++ three-API host was built for comparison.
 
 ## Known concerns in the old reference
 
@@ -806,6 +886,12 @@ The project owner clarified that gpugeno supports a funding proposal's cross-pla
 
 This shifts the immediate priority away from additional CUDA pileup correctness machinery. With a complete CUDA flagstat baseline already available, a native `wgpu` flagstat backend is the smallest useful proof that the same realistic operation can execute without CUDA. Direct Vulkan and pileup remain relevant later. Because `wgpu` on Linux/NVIDIA will likely select Vulkan on an NVIDIA device, final proposal evidence still requires access to an AMD, Intel, Apple, or other non-NVIDIA GPU and recording its adapter/backend and results.
 
+### Native `wgpu` flagstat outcome
+
+The selected portability slice succeeded without changing the indexed stream: the same batches and span starts feed a real WGSL compute pipeline, and the complete representative output matched both the host oracle and CUDA exactly. On the development machine, `wgpu` selected Vulkan on an RTX 3060 and exposed GPU timestamps for all three measured GPU stages. This establishes a non-CUDA API implementation but does not supersede the requirement for a run on non-NVIDIA hardware.
+
+The experiment also disproved any assumption that portable byte-addressing and reduction would be free host work. Packing 5.3 GiB of BAM bytes into WGSL-readable words and writing fresh staging buffers consumed several seconds, all now reported explicitly. Reuse/direct packing are optimization candidates, not correctness changes. CPU/software adapters are visible in enumeration (llvmpipe was adapter 3) and must be rejected to keep backend claims honest.
+
 ### CuBayes actor implementation is not authoritative
 
 The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
@@ -822,7 +908,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 - Linux/NVIDIA first.
 - BAI only.
 - Three public GPU backends eventually; no public CPU backend for now.
-- `wgpu` should eventually be the default backend.
+- `wgpu` is the default backend; CUDA remains explicitly selectable.
 - Requested unavailable backends fail; no silent fallback.
 - Fixed default batch size with a user override.
 - Self-contained automated tests.
@@ -835,7 +921,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that the CUDA flagstat slice is complete, plausible next experiments include parallel persistent libdeflate workers, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, native `wgpu` flagstat, direct Vulkan flagstat, external samtools compatibility validation, CUDA batch/launch tuning, or returning to pileup. None is approved; the next choice should be made from the completed timing and correctness evidence.
+Now that both CUDA and native `wgpu` flagstat slices are complete, plausible next experiments include an actual non-NVIDIA validation run, parallel persistent libdeflate workers, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, direct Vulkan flagstat, external samtools compatibility validation, CUDA/`wgpu` batch tuning, or returning to pileup. None is approved; the next choice must be made by the project owner from the completed timing and correctness evidence.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -845,6 +931,6 @@ When revisiting portable backends, preserve these general intentions unless evid
 - Report the actual adapter and underlying API used by `wgpu`; on Linux/NVIDIA it may itself use Vulkan.
 - Keep filesystem/decompression orchestration out of the compute contract so a future browser host remains plausible.
 
-## Immediate approved task
+## No immediate approved task
 
-Implement the native `wgpu` flagstat backend described in **Current handoff**. Success means `--backend wgpu` executes WGSL over the canonical BAM, reports its actual adapter/API, produces the same 32 counters as CUDA, exposes honest stage timings, and leaves all verification passing. Update this section at completion with evidence and either the next approved slice or an explicit statement that none is approved.
+The native `wgpu` flagstat backend is complete. No further slice is approved. The next fresh agent should summarize the completed CUDA/`wgpu` evidence and ask the project owner to choose one focused next experiment before editing implementation code.
