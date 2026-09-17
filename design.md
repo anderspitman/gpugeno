@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-15  
-**Current phase:** the native `wgpu` flagstat vertical slice is complete. CUDA and real WGSL paths now share the bounded indexed BAM stream and agree exactly on the representative BAM. No next slice is approved.
+**Current phase:** bounded parallel libdeflate decompression is approved and delegated to a fresh interactive Pi session. The public tuning option is `--threads N`; the experiment should measure scaling without combining it with pipeline overlap or GPU tuning.
 
 ## First-class fresh-agent workflow
 
@@ -41,9 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The native `wgpu` flagstat slice is complete and committed together with its evidence. `--backend wgpu` selects exactly one enumerated hardware adapter, reports its identity and underlying API, executes `src/flagstat.wgsl`, and never falls back to CUDA or a CPU/software adapter. The established CUDA path remains operational.
+The approved task is bounded parallel BGZF/libdeflate decompression shared by CUDA and `wgpu`. Add `--threads N` (not the longer `--decompression-threads`) and preserve deterministic outer batches, member order, virtual-offset translation, logical bytes, spans, and counters. Use persistent workers with one reusable libdeflate decompressor per worker and bounded in-flight memory; retain a one-thread baseline. Measure representative scaling at useful counts such as 1, 2, 4, 8, and 16 on the 24-CPU development environment, then choose/document a default from evidence.
 
-No next slice is approved. A future agent must present evidence-based options and ask the project owner before implementing another slice. Plausible choices remain an actual non-NVIDIA validation run, direct Vulkan, parallel decompression/pipeline overlap, or the first focused pileup experiment; none should be inferred as selected.
+Do not combine this experiment with CPU/GPU pipeline overlap, pinned memory, direct Vulkan, pileup, GPU kernel tuning, or the separate `wgpu` packing/staging optimization. Keep both backends and their validation paths operational.
+
+The first `wgpu` implementation has a separate major host-side inefficiency that must remain visible: its representative run spent roughly 4.6 seconds packing 5.3 GiB of BAM bytes into `u32` words and 2.2 seconds writing fresh staging buffers, versus about 0.46 seconds in the measured GPU stage. It also allocates per-batch resources. This is not WGSL kernel time and is a likely follow-up optimization after the shared decompression experiment.
 
 ## Purpose of this document
 
@@ -225,7 +227,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Implement the reusable indexed bounded-batch layer and CUDA flagstat path.
 - [x] Validate exact counters on `HG002_chr22.bam` against an independent host classifier.
 - [x] Implement and validate the native real-WGSL `wgpu` flagstat backend.
-- [ ] Select the next experiment from the completed cross-API evidence; none is currently approved.
+- [x] Select bounded parallel libdeflate decompression as the next experiment.
+- [ ] Implement and benchmark `--threads N` with persistent bounded workers.
 
 ## Current decisions
 
@@ -268,6 +271,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** Pack arbitrary BAM bytes into little-endian `u32` words for portable WGSL storage access. Report packing, staging writes, and per-batch resource setup separately rather than folding them into transfer or kernel time.
 - **Decided:** The WGSL kernel uses one 128-lane workgroup per existing span, a bounded shared record-offset table, workgroup atomic `u32` counters, and one 32-counter partial per span. The host widens and reduces partials into the common `u64` counters.
 - **Decided:** When both required timestamp features exist, H2D copies, the compute pass, and D2H copies use GPU timestamps. Otherwise the same three stages are separately submitted, synchronized, host-timed, and labeled `host-synchronized`.
+- **Observed performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers, compared with about 0.46 seconds for timestamped H2D+kernel+D2H. Those costs and per-batch allocation are explicitly reported and remain a separate future optimization; they must not be described as GPU kernel cost.
 - **Explicit non-goals:** direct Vulkan, pileup, browser execution, parallel decompression, pipeline overlap, CUDA tuning, and acquiring non-NVIDIA hardware.
 
 ### Completed first vertical slice boundaries
@@ -922,7 +926,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that both CUDA and native `wgpu` flagstat slices are complete, plausible next experiments include an actual non-NVIDIA validation run, parallel persistent libdeflate workers, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, direct Vulkan flagstat, external samtools compatibility validation, CUDA/`wgpu` batch tuning, or returning to pileup. None is approved; the next choice must be made by the project owner from the completed timing and correctness evidence.
+Now that both CUDA and native `wgpu` flagstat slices are complete, plausible later experiments include an actual non-NVIDIA validation run, CPU/GPU pipeline overlap, a focused pileup overlap/completion prototype, direct Vulkan flagstat, CUDA/`wgpu` batch tuning, or returning to pileup. The currently approved parallel-libdeflate task is the only committed next slice.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -932,6 +936,6 @@ When revisiting portable backends, preserve these general intentions unless evid
 - Report the actual adapter and underlying API used by `wgpu`; on Linux/NVIDIA it may itself use Vulkan.
 - Keep filesystem/decompression orchestration out of the compute contract so a future browser host remains plausible.
 
-## No immediate approved task
+## Immediate approved task
 
-The native `wgpu` flagstat backend is complete. No further slice is approved. The next fresh agent should summarize the completed CUDA/`wgpu` evidence and ask the project owner to choose one focused next experiment before editing implementation code.
+Implement and benchmark the bounded parallel-libdeflate worker path described in **Current handoff**. The task succeeds when `--threads N` controls real concurrent BGZF decompression, one-thread and parallel runs produce identical representative bytes/spans/counters on both backends, thread-count scaling is recorded, all verification passes, and the implementation plus `design.md` are committed with a clean tree. At completion, state explicitly that no following slice is approved unless the project owner selects one.
