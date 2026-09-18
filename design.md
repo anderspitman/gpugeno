@@ -45,6 +45,8 @@ The owner approved the complete whole-file public Direct Vulkan backend slice. T
 
 The prior synthetic spike is the source of the dedicated shader and classifier semantics, but its per-call five-buffer ownership and private module are superseded by this production slice. The owner-approved controlled three-backend HG002 comparison is complete; see `Completed HG002 three-backend performance comparison` below. It made no implementation changes, and no next implementation slice is approved.
 
+## Purpose of this document
+
 This is the durable memory for `gpugeno`. Its goal is to let a future coding agent reconstruct the project as closely as practical without needing the original conversation.
 
 It must preserve three kinds of information:
@@ -1003,7 +1005,7 @@ Completed 2026-09-18 on the Linux development host as the owner-approved documen
 
 The existing diagnostics and failure listings enumerated these devices; software and duplicate-API entries were not selected:
 
-- CUDA reported two available devices (the existing `--device 3` failure said `2 available`); `nvidia-smi` identified CUDA device 0 as NVIDIA GeForce RTX 3060, 12,288 MiB, PCI bus `00000000:00:06.0`, and device 1 as the same model on `00000000:00:08.0`. The NVIDIA driver was 550.163.01 and the installed CUDA Runtime API/toolkit was 12.4.131. The selected CUDA row is device 0, timed with CUDA events.
+- CUDA reported two available devices (the existing `--device 3` failure said `2 available`); `nvidia-smi` identified CUDA device 0 as NVIDIA GeForce RTX 3060, 12,288 MiB, PCI bus `00000000:00:06.0`, and device 1 as the same model on `00000000:00:08.0`. The NVIDIA driver was 550.163.01 and the installed CUDA toolkit compiler reported 12.4.131. The selected CUDA row is device 0, timed with CUDA events.
 - Direct Vulkan's existing invalid-index listing was: physical 0 AMD Radeon RX 6600 (RADV NAVI23), physical 1 NVIDIA GeForce RTX 3060, physical 2 NVIDIA GeForce RTX 3060, and physical 3 `llvmpipe` CPU. The selected AMD row is physical device 0, vendor/device `0x1002/0x73ff`, API 1.4.318; the selected NVIDIA row is the first hardware device, physical device 1, vendor/device `0x10de/0x2504`, API 1.3.277. Both reported `gpu-timestamps`; the driver stack was RADV/Mesa 25.2.7 for AMD and NVIDIA 550.163.01 for NVIDIA.
 - `wgpu`'s existing invalid-index listing was: adapter 0 AMD/RADV/Vulkan `DiscreteGpu`, adapter 1 NVIDIA/Vulkan `DiscreteGpu`, adapter 2 NVIDIA/Vulkan `DiscreteGpu`, adapter 3 `llvmpipe`/Vulkan `Cpu`, and adapter 4 NVIDIA `.../PCIe/SSE2`/GL `Other`. The selected AMD row is adapter 0 (`api=Vulkan`, driver `radv`, `Mesa 25.2.7`); the selected NVIDIA row is the first hardware Vulkan adapter, adapter 1 (`api=Vulkan`, driver `NVIDIA`, `550.163.01`). Both reported `gpu-timestamps`. No GL duplicate or software adapter was benchmarked.
 
