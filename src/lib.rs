@@ -1,4 +1,5 @@
-//! Safe Rust boundary for the statically linked CUDA implementation.
+//! Direct Vulkan owns the production `ash` backend; the historical diagnostic
+//! example keeps its `vulkan_flagstat_spike` name but imports this module.
 //!
 //! The native host side is `cuda/gpugeno_cuda.cu`, and operation-specific
 //! kernels such as flagstat live in their own CUDA sources. They are compiled by `nvcc` (see
@@ -9,7 +10,7 @@ pub mod bai;
 pub mod bam;
 pub mod bgzf;
 pub mod indexed_batch;
-pub mod vulkan_spike;
+pub mod vulkan_backend;
 pub mod wgpu_backend;
 
 use bam::FlagstatCounters;

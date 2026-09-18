@@ -4,6 +4,7 @@ use gpugeno::bam::{
 };
 use gpugeno::bgzf::data_end_virtual_offset;
 use gpugeno::indexed_batch::DisjointBamStream;
+use gpugeno::vulkan_backend::VulkanContext;
 use gpugeno::wgpu_backend::WgpuContext;
 use gpugeno::CudaContext;
 use std::path::PathBuf;
@@ -27,7 +28,7 @@ struct Args {
     input: PathBuf,
     bai: Option<PathBuf>,
     backend: BackendChoice,
-    device: i32,
+    device: u64,
     max_uncompressed_bytes: usize,
     threads: usize,
     benchmark: bool,
@@ -37,6 +38,7 @@ struct Args {
 #[derive(Clone, Copy)]
 enum BackendChoice {
     Cuda,
+    Vulkan,
     Wgpu,
 }
 
@@ -44,6 +46,7 @@ impl BackendChoice {
     fn name(self) -> &'static str {
         match self {
             Self::Cuda => "cuda",
+            Self::Vulkan => "vulkan",
             Self::Wgpu => "wgpu",
         }
     }
@@ -51,6 +54,7 @@ impl BackendChoice {
 
 enum BackendContext {
     Cuda(CudaContext),
+    Vulkan(Box<VulkanContext>),
     Wgpu(Box<WgpuContext>),
 }
 
@@ -85,11 +89,34 @@ fn run() -> Result<(), String> {
     let anchor_count = stream.anchor_count();
     let mut context = match args.backend {
         BackendChoice::Cuda => BackendContext::Cuda(
-            CudaContext::create(args.device).map_err(|error| error.to_string())?,
+            CudaContext::create(
+                i32::try_from(args.device)
+                    .map_err(|_| "--device is too large for CUDA's device index".to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
         ),
+        BackendChoice::Vulkan => {
+            let device_index = u32::try_from(args.device)
+                .map_err(|_| "--device must fit a nonnegative Vulkan u32 index".to_string())?;
+            let context = VulkanContext::create(device_index).map_err(|error| error.to_string())?;
+            let info = context.device_info();
+            eprintln!(
+                "gpugeno vulkan: physical_device_index={} name={:?} device_type={:?} vendor_id=0x{:04x} device_id=0x{:04x} api_version={}.{}.{} timing_source={}",
+                info.index,
+                info.name,
+                info.device_type,
+                info.vendor_id,
+                info.device_id,
+                info.api_version >> 22,
+                (info.api_version >> 12) & 0x3ff,
+                info.api_version & 0xfff,
+                context.timing_source()
+            );
+            BackendContext::Vulkan(Box::new(context))
+        }
         BackendChoice::Wgpu => {
             let adapter_index = u32::try_from(args.device)
-                .map_err(|_| "--device must be nonnegative for wgpu".to_string())?;
+                .map_err(|_| "--device must fit a nonnegative wgpu u32 index".to_string())?;
             let context = WgpuContext::create(adapter_index).map_err(|error| error.to_string())?;
             let info = context.adapter_info();
             eprintln!(
@@ -120,6 +147,8 @@ fn run() -> Result<(), String> {
     let mut packing_ms = 0.0f64;
     let mut staging_ms = 0.0f64;
     let mut setup_ms = 0.0f64;
+    let mut vulkan_staging_ms = 0.0f64;
+    let mut vulkan_setup_ms = 0.0f64;
     let mut host_validation_ms = 0.0f64;
 
     while let Some(batch) = stream.next_batch().map_err(|error| error.to_string())? {
@@ -154,6 +183,26 @@ fn run() -> Result<(), String> {
                 h2d_ms += f64::from(result.timings.h2d_ms);
                 kernel_ms += f64::from(result.timings.kernel_ms);
                 d2h_ms += f64::from(result.timings.d2h_ms);
+            }
+            BackendContext::Vulkan(context) => {
+                let result =
+                    context
+                        .flagstat(&batch.data, &batch.span_starts)
+                        .map_err(|error| {
+                            format!(
+                                "Vulkan flagstat failed for virtual range {}..{}: {error}",
+                                batch.virtual_start.raw(),
+                                batch.virtual_end.raw()
+                            )
+                        })?;
+                for partial in &result.span_counts {
+                    gpu_total.add_assign(partial);
+                }
+                vulkan_staging_ms += result.timings.staging_ms;
+                vulkan_setup_ms += result.timings.setup_ms;
+                h2d_ms += result.timings.h2d_ms;
+                kernel_ms += result.timings.kernel_ms;
+                d2h_ms += result.timings.d2h_ms;
             }
             BackendContext::Wgpu(context) => {
                 let result =
@@ -218,6 +267,11 @@ fn run() -> Result<(), String> {
             h2d_ms + kernel_ms + d2h_ms,
             wall_start.elapsed().as_secs_f64() * 1000.0
         );
+        if matches!(args.backend, BackendChoice::Vulkan) {
+            eprintln!(
+                "gpugeno benchmark: vulkan_host_staging_write={vulkan_staging_ms:.3} ms vulkan_resource_setup={vulkan_setup_ms:.3} ms vulkan_packing=0.000 ms vulkan_upload_mode=raw-little-endian"
+            );
+        }
         if matches!(args.backend, BackendChoice::Wgpu) {
             eprintln!(
                 "gpugeno benchmark: wgpu_host_packing={packing_ms:.3} ms wgpu_staging_write={staging_ms:.3} ms wgpu_resource_setup={setup_ms:.3} ms wgpu_upload_mode=raw-little-endian"
@@ -259,8 +313,8 @@ fn parse_args() -> Result<Args, String> {
                 }
                 device = Some(
                     value
-                        .parse::<i32>()
-                        .map_err(|_| format!("--device is not an integer: {value}"))?,
+                        .parse::<u64>()
+                        .map_err(|_| format!("--device must be a nonnegative integer: {value}"))?,
                 );
             }
             "--bai" => {
@@ -311,20 +365,16 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
-    let backend =
-        match backend.as_deref().unwrap_or("wgpu") {
-            "cuda" => BackendChoice::Cuda,
-            "wgpu" => BackendChoice::Wgpu,
-            "vulkan" => return Err(
-                "backend \"vulkan\" is unavailable; direct Vulkan is not implemented (no fallback)"
-                    .to_string(),
-            ),
-            value => {
-                return Err(format!(
-                    "unsupported backend {value:?}; expected cuda, vulkan, or wgpu"
-                ));
-            }
-        };
+    let backend = match backend.as_deref().unwrap_or("wgpu") {
+        "cuda" => BackendChoice::Cuda,
+        "vulkan" => BackendChoice::Vulkan,
+        "wgpu" => BackendChoice::Wgpu,
+        value => {
+            return Err(format!(
+                "unsupported backend {value:?}; expected cuda, vulkan, or wgpu"
+            ));
+        }
+    };
 
     Ok(Args {
         input: input.ok_or_else(usage)?,
@@ -356,5 +406,5 @@ fn set_once(
 }
 
 fn usage() -> String {
-    "usage: gpugeno flagstat INPUT.bam [--backend cuda|wgpu] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--threads N] [--benchmark] [--validate]".to_string()
+    "usage: gpugeno flagstat INPUT.bam [--backend cuda|vulkan|wgpu] [--device N] [--bai INPUT.bam.bai] [--max-uncompressed-bytes N] [--threads N] [--benchmark] [--validate]".to_string()
 }

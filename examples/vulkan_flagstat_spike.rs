@@ -1,7 +1,7 @@
 //! Self-contained direct-Vulkan synthetic flagstat integration spike.
 
 use gpugeno::bam::{classify_records, FlagstatCounters};
-use gpugeno::vulkan_spike::VulkanContext;
+use gpugeno::vulkan_backend::VulkanContext;
 use std::error::Error;
 
 fn record(flag: u16, mapq: u8, reference_id: i32, next_reference_id: i32) -> Vec<u8> {

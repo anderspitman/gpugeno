@@ -1,4 +1,4 @@
-//! Builds the native CUDA implementation and the direct-Vulkan spike shader.
+//! Builds the native CUDA implementation and the direct-Vulkan flagstat shader.
 //!
 //! CUDA is compiled with explicit `nvcc`/`ar` invocations. The Vulkan-specific
 //! WGSL source is validated and translated to embedded SPIR-V by `naga`, so a
