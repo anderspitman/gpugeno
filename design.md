@@ -141,7 +141,7 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is `2bf1028` (`Optimize wgpu raw BAM uploads`), and the current documentation checkpoint is `b40468f` (`Record AMD wgpu validation`). `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is `2bf1028` (`Optimize wgpu raw BAM uploads`); subsequent documentation records the AMD validation and current handoff audit. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
