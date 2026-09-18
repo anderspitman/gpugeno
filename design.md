@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-18
-**Current phase:** the approved complete public Direct Vulkan backend slice is complete. `gpugeno flagstat --backend vulkan` consumes canonical streamed batches through one synchronized grow-only Vulkan slot, matches the host oracle on the complete canonical BAM, and reports separate upload/kernel/readback timing. No next slice is approved; the fixed non-goals remain no multiple slots, overlap, pileup, CUDA packaging changes, validation-layer installation, generalized allocator, other OS work, or reference-repository edits.
+**Current phase:** the approved complete public Direct Vulkan backend slice and the owner-approved controlled three-backend HG002 performance comparison are complete. `gpugeno flagstat --backend vulkan` consumes canonical streamed batches through one synchronized grow-only Vulkan slot, matches the host oracle on the complete canonical BAM, and reports separate upload/kernel/readback timing. No next slice is approved; the fixed non-goals remain no multiple slots, overlap, pileup, CUDA packaging changes, validation-layer installation, generalized allocator, other OS work, or reference-repository edits.
 
 ## First-class fresh-agent workflow
 
@@ -43,9 +43,7 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 The owner approved the complete whole-file public Direct Vulkan backend slice. This implementation promotes the focused `ash` classifier into `src/vulkan_backend.rs`, wires `gpugeno flagstat --backend vulkan`, and keeps the diagnostic example on the production module. Vulkan consumes each streamed batch's canonical `IndexedBamBatch::data` and `span_starts`, uses one synchronized grow-only resource slot, reports separate H2D/kernel/D2H timing (GPU timestamps or separately host-synchronized submissions), and rejects non-GPU/software physical devices without fallback. The explicit non-goals are the fixed list in the task handoff: no multiple slots, overlap, pileup, CUDA-free packaging, validation layers, generalized allocator, other OS work, or reference-repository edits.
 
-The prior synthetic spike is the source of the dedicated shader and classifier semantics, but its per-call five-buffer ownership and private module are superseded by this production slice. No next slice is approved after this one.
-
-## Purpose of this document
+The prior synthetic spike is the source of the dedicated shader and classifier semantics, but its per-call five-buffer ownership and private module are superseded by this production slice. The owner-approved controlled three-backend HG002 comparison is complete; see `Completed HG002 three-backend performance comparison` below. It made no implementation changes, and no next implementation slice is approved.
 
 This is the durable memory for `gpugeno`. Its goal is to let a future coding agent reconstruct the project as closely as practical without needing the original conversation.
 
@@ -997,6 +995,103 @@ Review corrected the historical per-call ownership design rather than carrying i
 
 Remaining risks are bounded and explicit: available hardware selected the GPU-timestamp/coherent paths, so the three-submission host-timing fallback and non-coherent flush/invalidate branch were reviewed but not selected by smoke devices; no Vulkan validation layer or other OS/vendor was tested; unusual sparse BAI and oversized-span behavior retain the existing clear-error policy; external samtools was unavailable; CUDA build/linkage remains unconditional; and the mixed Vulkan/`wgpu` driver SIGSEGV risk is mitigated only for tests by `GPU_TEST_LOCK`, not root-caused for concurrent production API use. No multiple slots, overlap, double buffering, allocator, pileup, packaging change, or reference-repository edit was added. No next slice is approved.
 
+## Completed HG002 three-backend performance comparison
+
+### Approval, device enumeration, and selected matrix
+
+Completed 2026-09-18 on the Linux development host as the owner-approved documentation-only comparison of all three public GPU backends. No implementation code, `cubayes/`, or `libshadowfax/` was changed. The fixed workload was `/agents/shadowfax/data/HG002_chr22.bam` with its default adjacent BAI, a 268,435,456-byte (256 MiB) maximum uncompressed batch, eight decompression workers, the release binary, benchmark mode, and one complete streaming pass per invocation.
+
+The existing diagnostics and failure listings enumerated these devices; software and duplicate-API entries were not selected:
+
+- CUDA reported two available devices (the existing `--device 3` failure said `2 available`); `nvidia-smi` identified CUDA device 0 as NVIDIA GeForce RTX 3060, 12,288 MiB, PCI bus `00000000:00:06.0`, and device 1 as the same model on `00000000:00:08.0`. The NVIDIA driver was 550.163.01 and the installed CUDA Runtime API/toolkit was 12.4.131. The selected CUDA row is device 0, timed with CUDA events.
+- Direct Vulkan's existing invalid-index listing was: physical 0 AMD Radeon RX 6600 (RADV NAVI23), physical 1 NVIDIA GeForce RTX 3060, physical 2 NVIDIA GeForce RTX 3060, and physical 3 `llvmpipe` CPU. The selected AMD row is physical device 0, vendor/device `0x1002/0x73ff`, API 1.4.318; the selected NVIDIA row is the first hardware device, physical device 1, vendor/device `0x10de/0x2504`, API 1.3.277. Both reported `gpu-timestamps`; the driver stack was RADV/Mesa 25.2.7 for AMD and NVIDIA 550.163.01 for NVIDIA.
+- `wgpu`'s existing invalid-index listing was: adapter 0 AMD/RADV/Vulkan `DiscreteGpu`, adapter 1 NVIDIA/Vulkan `DiscreteGpu`, adapter 2 NVIDIA/Vulkan `DiscreteGpu`, adapter 3 `llvmpipe`/Vulkan `Cpu`, and adapter 4 NVIDIA `.../PCIe/SSE2`/GL `Other`. The selected AMD row is adapter 0 (`api=Vulkan`, driver `radv`, `Mesa 25.2.7`); the selected NVIDIA row is the first hardware Vulkan adapter, adapter 1 (`api=Vulkan`, driver `NVIDIA`, `550.163.01`). Both reported `gpu-timestamps`. No GL duplicate or software adapter was benchmarked.
+
+The five matrix combinations, in the required order, were: CUDA NVIDIA device 0; Direct Vulkan AMD physical device 0; `wgpu` AMD/Vulkan adapter 0; Direct Vulkan NVIDIA physical device 1; and `wgpu` NVIDIA/Vulkan adapter 1. The two NVIDIA APIs expose the same RTX 3060 model and device ID, but exact physical-board identity across CUDA and Vulkan enumeration was not established; the comparison is therefore labeled same-model rather than same-board.
+
+### Commands, run counts, and controls
+
+The binary was built once before sampling:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build --release --all-targets
+```
+
+Each invocation used the binary directly, with the backend/device substituted from the matrix:
+
+```bash
+target/release/gpugeno flagstat /agents/shadowfax/data/HG002_chr22.bam \
+  --backend BACKEND --device DEVICE \
+  --max-uncompressed-bytes 268435456 --threads 8 --benchmark [--validate]
+```
+
+There were exactly five correctness preflights (one per matrix row), with `--validate`; their timings were excluded from statistics because host validation materially changes wall time. There was then exactly one non-validating warmup per row and seven non-validating measured invocations per row: 5 preflights, 5 warmups, and 35 measured passes (7 per combination). Measured rounds were single-process and deterministic rotating order; round starts were matrix positions 0, 1, 2, 3, 4, 0, and 1, so no backends ran concurrently. The measured logs preserve each stdout/stderr pair under `/tmp/gpugeno-hg002-measured-r*-<combination>.{out,err}`; corresponding preflight and warmup logs are under `/tmp/gpugeno-hg002-preflight-*` and `/tmp/gpugeno-hg002-warmup-*`.
+
+The filesystem/page cache was left warm after preflight and warmup. Linux caches were not dropped, root was not requested, and no cold-I/O claim is made. The comparison is a warm-cache, one-process-at-a-time comparison with fixed eight-worker decompression, one synchronized backend resource slot, and no CPU/GPU overlap.
+
+### Correctness and coverage
+
+All five preflights exited 0, reported `result=exact-match`, and reported exactly 20 batches, 2,284 spans, 2,285 anchors, 82,360 decompressed blocks, 5,324,198,102 logical bytes, and 1,645,336,143 compressed bytes read. Their stdout files were byte-identical. The established stdout SHA-256 was:
+
+```text
+dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113
+```
+
+Every warmup and all 35 measured invocations also exited 0, retained the exact standard coverage fields and this stdout hash, and no invocation was discarded or rerun. The seven-run statistics below use only the 35 measured invocations; measured runs intentionally omitted `--validate`.
+
+### Absolute measured results
+
+All cells below are milliseconds and use `median (observed min–max)` over seven measured runs. `Host staging write`, `resource setup`, and `packing` are the separately reported backend fields; a dash means that backend does not report that field. `wgpu` and Direct Vulkan packing are explicitly zero because their raw-little-endian paths have no packing pass.
+
+| combination | metadata | batch_build | H2D | kernel | D2H | GPU_stage | wall | host staging write | resource setup | packing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| CUDA NVIDIA device 0 | 0.464 (0.437–0.638) | 1,775.435 (1,748.024–1,819.206) | 364.390 (357.740–404.042) | 81.634 (81.584–81.848) | 0.505 (0.448–0.558) | 446.530 (440.036–486.219) | 2,340.233 (2,303.095–2,386.931) | — | — | — |
+| Direct Vulkan AMD physical 0 | 0.464 (0.413–0.560) | 1,796.264 (1,781.760–1,822.923) | 376.592 (376.263–377.054) | 58.944 (58.643–59.245) | 0.065 (0.064–0.322) | 435.757 (434.984–436.429) | 3,708.951 (3,585.649–3,810.317) | 634.994 (617.030–645.349) | 2.943 (2.879–3.076) | 0.000 (0.000–0.000) |
+| `wgpu` AMD/Vulkan adapter 0 | 0.487 (0.450–0.681) | 1,816.767 (1,791.657–1,841.774) | 380.991 (380.904–381.463) | 59.042 (58.909–59.283) | 0.050 (0.050–0.051) | 440.223 (439.880–440.554) | 3,517.816 (3,468.799–3,568.672) | 347.363 (340.039–351.915) | 23.818 (23.065–24.393) | 0.000 (0.000–0.000) |
+| Direct Vulkan NVIDIA physical 1 | 0.465 (0.436–0.688) | 1,780.941 (1,747.514–1,828.577) | 221.652 (221.165–222.143) | 51.053 (51.030–51.065) | 0.052 (0.050–0.052) | 272.769 (272.250–273.229) | 3,317.404 (3,186.935–3,386.769) | 312.026 (309.496–313.348) | 74.874 (71.729–83.616) | 0.000 (0.000–0.000) |
+| `wgpu` NVIDIA/Vulkan adapter 1 | 0.514 (0.422–0.556) | 1,780.620 (1,752.549–1,808.351) | 221.772 (221.363–222.178) | 51.220 (51.197–51.235) | 0.130 (0.128–0.136) | 273.116 (272.713–273.549) | 3,292.456 (3,232.865–3,349.036) | 324.501 (321.930–327.588) | 82.237 (78.045–87.211) | 0.000 (0.000–0.000) |
+
+Derived throughput uses the fixed 5,324,198,102 logical bytes and each median time: `bytes / (median milliseconds × 10^6)`, in decimal GB/s.
+
+| combination | kernel throughput | aggregate GPU-stage throughput | wall throughput |
+|---|---:|---:|---:|
+| CUDA NVIDIA device 0 | 65.220 GB/s | 11.923 GB/s | 2.275 GB/s |
+| Direct Vulkan AMD physical 0 | 90.326 GB/s | 12.218 GB/s | 1.435 GB/s |
+| `wgpu` AMD/Vulkan adapter 0 | 90.176 GB/s | 12.094 GB/s | 1.513 GB/s |
+| Direct Vulkan NVIDIA physical 1 | 104.288 GB/s | 19.519 GB/s | 1.605 GB/s |
+| `wgpu` NVIDIA/Vulkan adapter 1 | 103.948 GB/s | 19.494 GB/s | 1.617 GB/s |
+
+### RTX 3060-class three-backend view
+
+Ratios are `row median / Direct Vulkan NVIDIA median` for the same metric; `1.000` is the Direct Vulkan baseline, values below 1 mean lower time/faster, and values above 1 mean higher time/slower. The rows are same-model comparisons, not proven same-board comparisons.
+
+| backend/device | kernel median (range) | kernel ratio | GPU_stage median (range) | GPU-stage ratio | wall median (range) | wall ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| Direct Vulkan, physical 1 | 51.053 (51.030–51.065) | 1.000 | 272.769 (272.250–273.229) | 1.000 | 3,317.404 (3,186.935–3,386.769) | 1.000 |
+| CUDA, device 0 | 81.634 (81.584–81.848) | 1.599 | 446.530 (440.036–486.219) | 1.637 | 2,340.233 (2,303.095–2,386.931) | 0.705 |
+| `wgpu`, adapter 1 | 51.220 (51.197–51.235) | 1.003 | 273.116 (272.713–273.549) | 1.001 | 3,292.456 (3,232.865–3,349.036) | 0.992 |
+
+### AMD RX 6600 Direct Vulkan versus `wgpu`
+
+Ratios use the same `row median / Direct Vulkan AMD median` definition. Host feeding is kept separate from GPU timings. The `host-feed median` is the median of each run's staging-plus-setup fields and is a descriptive derived value, not a replacement for either separately reported field.
+
+| backend/device | kernel median (range) | kernel ratio | GPU_stage median (range) | GPU-stage ratio | wall median (range) | wall ratio | host staging write | resource setup | packing | host-feed median (range) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Direct Vulkan, physical 0 | 58.944 (58.643–59.245) | 1.000 | 435.757 (434.984–436.429) | 1.000 | 3,708.951 (3,585.649–3,810.317) | 1.000 | 634.994 (617.030–645.349) | 2.943 (2.879–3.076) | 0.000 (0.000–0.000) | 637.934 (619.939–648.425) |
+| `wgpu`, adapter 0 | 59.042 (58.909–59.283) | 1.002 | 440.223 (439.880–440.554) | 1.010 | 3,517.816 (3,468.799–3,568.672) | 0.948 | 347.363 (340.039–351.915) | 23.818 (23.065–24.393) | 0.000 (0.000–0.000) | 371.181 (364.432–375.965) |
+
+### Interpretation, defects, and limitations
+
+- CUDA is available only on NVIDIA in this matrix; there is no AMD CUDA row. The AMD differences therefore cannot be attributed to API choice alone, and the RTX view also combines different host/API/driver stacks.
+- Direct Vulkan and `wgpu` on both selected portable devices use Vulkan underneath. Their AMD comparison measures abstraction/runtime/resource-path differences over the same underlying API family, not Vulkan versus a different low-level driver API. The backends remain independently optimized and have different host staging implementations.
+- All selected devices exposed GPU timestamps, so H2D, kernel, and D2H are the primary stage comparison. No host-synchronized timing row was substituted or mixed into these tables. H2D is the largest GPU-stage component in every median row (about 222–381 ms), while kernel is about 51–82 ms and D2H is negligible; the GPU-stage totals are not kernel timings.
+- Shared `batch_build` is the largest named time in every row (about 1.776–1.817 s). Backend-specific host feeding is also material: Direct Vulkan AMD staging is 635 ms, versus 347 ms for `wgpu` AMD; on NVIDIA, Vulkan and `wgpu` staging are about 312 and 325 ms, with resource setup around 75 and 82 ms. Packing is zero for both raw-little-endian paths. These are measured bottleneck observations, not causal proof from seven samples.
+- Program `wall` starts inside the process before metadata and backend construction and includes metadata, decompression/batch construction, API context/resource work, transfers, compute, readback, and output orchestration. It excludes shell/process-launch measurement; measured runs also exclude timed host validation because they did not use `--validate`. The CUDA wall ratio below one despite its slower GPU-stage ratio is therefore not an API-only result: wall includes different orchestration and the exact physical NVIDIA board identity was not proven. Likewise, the AMD `wgpu` wall ratio below one accompanies lower measured host feeding while its GPU-stage ratio is slightly above one; this is an observation, not a causal attribution.
+- The two NVIDIA Vulkan enumerations and CUDA enumeration showed RTX 3060 devices, but no cross-API PCI/UUID identity proof was available from the existing diagnostics. The same-model label is intentional. Software entries (`llvmpipe` and the `wgpu` GL duplicate) were excluded.
+- Seven observations per combination provide variability context, not a statistically rigorous hardware benchmarking campaign or a claim of significance. This is a controlled seven-run, warm-cache comparison, not cold storage behavior or a definitive benchmark distribution. Fixed eight-worker decompression, one synchronized slot, no overlap, and the shared batch policy are part of the result.
+- No invocation failed, differed, or required an outlier discard. A notable inventory discrepancy is that the current CUDA installation exposes two RTX 3060 devices, whereas older project memory described three; the required device 0 remained available. The raw logs are ephemeral evidence at `/tmp/gpugeno-hg002-preflight-*`, `/tmp/gpugeno-hg002-warmup-*`, and `/tmp/gpugeno-hg002-measured-*`; they are not a durable repository dependency.
+
 ## Superseded candidate: GPU per-block byte sums
 
 This candidate was not implemented. The project owner selected the more ambitious whole-file flagstat slice instead.
@@ -1287,4 +1382,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-The approved complete public Direct Vulkan whole-file flagstat backend is complete and documented above. There is no next slice approved; do not infer one from deferred possibilities.
+The owner-approved controlled three-backend HG002 performance comparison is complete and documented above. The public CUDA, Direct Vulkan, and `wgpu` implementation state is unchanged, the repository contains no benchmark logs, and no next implementation slice is approved; do not infer one from deferred possibilities.
