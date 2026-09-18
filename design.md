@@ -141,7 +141,7 @@ The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The raw-upload/reusable-resource optimization is the latest checkpoint; `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is `2bf1028` (`Optimize wgpu raw BAM uploads`), and the current documentation checkpoint is `b40468f` (`Record AMD wgpu validation`). `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -980,7 +980,7 @@ These were hypotheses before the whole-file CUDA and `wgpu` experiments. Their c
 2. **Observed on the representative BAM:** explicit first/end anchors partitioned all 5,324,198,102 alignment-stream bytes exactly once, including the tail.
 3. **Still unproven generally:** sparse or repeated BAI intervals may expose a span larger than the configured cap; the current path reports an error rather than scanning or skipping.
 4. **Superseded implementation idea:** neither backend uses the old reference's duplicate `nth_read` traversal; both use a bounded lane-0 record-offset table.
-5. **Observed:** CPU libdeflate and transfers feed measurable kernels, although sequential batch construction dominates and `wgpu` packing/staging adds substantial host work.
+5. **Observed and improved:** CPU libdeflate and transfers feed measurable kernels. Sequential batch construction initially dominated, but eight persistent workers reduced its median from 7.855 seconds to 1.781 seconds. The original `wgpu` packing/staging bottleneck was subsequently reduced from 5.844 seconds to 0.406 seconds for packing+staging+setup in the paired observation.
 6. **Not directly evaluated:** the Rust host plus CUDA C ABI worked, and native Rust `wgpu` integrated cleanly, but no all-C/C++ three-API host was built for comparison.
 
 ## Known concerns in the old reference
@@ -990,7 +990,7 @@ These are source observations, not yet reproduced test failures:
 - Mainline CuBayes does not contain a flagstat implementation; the kernel exists only in `libshadowfax`.
 - The old `libshadowfax` stream wrappers appear capable of returning `done`/`NULL` when a batch end reaches the EOF sentinel, potentially discarding the final batch. The new path does not use those wrappers; explicit physical-end coverage accounted for the full representative stream.
 - The old partitioner sometimes skips a single oversized window or zero-byte spans. `gpugeno` instead rejects an indivisible oversized span and its tests verify that behavior; it never silently advances past one.
-- The old CPU decompression fallback allocates and frees a libdeflate decompressor for every BGZF block. `gpugeno` should prefer persistent worker-owned decompressors.
+- The old CPU decompression fallback allocates and frees a libdeflate decompressor for every BGZF block. `gpugeno` now uses persistent workers with one reused decompressor per worker.
 - The old default path uses nvCOMP. `gpugeno` intentionally moves decompression to CPU libdeflate so that all GPU backends can share the same decompressed input path.
 
 ## Decision and discovery history
@@ -1118,6 +1118,6 @@ When revisiting portable backends, preserve these general intentions unless evid
 - Report the actual adapter and underlying API used by `wgpu`; on Linux/NVIDIA it may itself use Vulkan.
 - Keep filesystem/decompression orchestration out of the compute contract so a future browser host remains plausible.
 
-## Immediate approved task
+## Immediate task status
 
-None. The `wgpu` raw-upload and reusable single-slot optimization is complete. Wait for the project owner to select the next slice; do not infer one from the deferred possibilities.
+None approved. The `wgpu` raw-upload and reusable single-slot optimization is complete. Wait for the project owner to select the next slice; do not infer one from the deferred possibilities.
