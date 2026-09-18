@@ -251,8 +251,10 @@ dependencies = [
 name = "gpugeno"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "libdeflater",
+ "naga",
  "pollster",
  "wgpu",
 ]

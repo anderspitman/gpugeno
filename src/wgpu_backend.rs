@@ -848,6 +848,7 @@ mod tests {
 
     #[test]
     fn real_wgsl_classifier_matches_host_on_representative_flags() {
+        let _gpu_test_guard = crate::GPU_TEST_LOCK.lock().unwrap();
         let mut context = WgpuContext::create(0).expect("a hardware wgpu adapter is required");
         let mut first = record(0x100 | 0x800 | 0x400, 60, 0, 0);
         first[..4].copy_from_slice(&33u32.to_le_bytes());

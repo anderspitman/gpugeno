@@ -9,9 +9,13 @@ pub mod bai;
 pub mod bam;
 pub mod bgzf;
 pub mod indexed_batch;
+pub mod vulkan_spike;
 pub mod wgpu_backend;
 
 use bam::FlagstatCounters;
+
+#[cfg(test)]
+pub(crate) static GPU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Timings reported by a native CUDA vector-add call, in milliseconds.
 ///

@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
-**Last updated:** 2026-09-17
-**Current phase:** the `wgpu` raw-upload and reusable single-slot optimization is complete. It removed the full BAM `Vec<u8>`→`Vec<u32>` packing pass, added bounded grow-only resources, preserved exact counters and CUDA behavior, and materially reduced portable-backend wall time. A post-completion representative run also succeeded on an AMD Radeon RX 6600 through RADV/Vulkan, providing actual non-NVIDIA execution evidence. No following slice is approved.
+**Last updated:** 2026-09-18
+**Current phase:** the approved thin direct-Vulkan synthetic flagstat integration spike is complete. Rust/`ash` now runs a Vulkan-specific embedded SPIR-V classifier on a selected physical GPU, returns exact per-span counters/status, and matches the independent host oracle. AMD and NVIDIA smoke runs succeeded with valid-bit-aware GPU timestamps. The public `--backend vulkan` path remains intentionally unavailable, and no following slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -41,13 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The approved `wgpu` host-feeding optimization is complete in commit history. `IndexedBamBatch.data` remains the canonical Rust-owned byte stream. The portable backend copies those bytes directly into a reusable mapped upload buffer, zeroes only the final zero to three bytes required for a complete storage word, and passes the unpadded logical byte count separately. One explicit synchronized slot owns grow-only power-of-two-class input/upload, span, parameter, result/status, timestamp, and readback resources. Operation-neutral raw BAM/span resources are structurally separate from flagstat's pipeline, parameters, and outputs, leaving a clear boundary for pileup and a future slot pool.
+The direct-Vulkan synthetic flagstat integration spike is complete. `src/vulkan_spike.rs` is a deliberately thin Rust/`ash` owner for the Vulkan loader/instance, selected physical and logical device, compute queue, command pool/buffer, reusable fence, descriptor/pipeline objects, optional timestamp query pool, and per-call host-visible buffers. `build.rs` validates and translates the dedicated `src/vulkan_flagstat.wgsl` to SPIR-V 1.3 with `naga`, and the Rust binary embeds it from `OUT_DIR`; no external shader compiler is required. The focused tests and `examples/vulkan_flagstat_spike.rs` feed four synthetic canonical BAM records in two aligned spans, check every per-span counter and the widened common reduction against `bam::classify_records`, expose malformed-record status, reject invalid/CPU/software devices, and reuse synchronization after an error-status dispatch.
 
-The paired NVIDIA representative run reduced reported packing from 3,808.327 ms to zero, staging writes from 1,919.175 ms to 314.014 ms, resource setup from 116.167 ms to 92.337 ms, and wall time from 11,509.907 ms to 4,785.535 ms. These are paired single-run benchmark-mode observations, not a timing distribution. Exact details and commands are in **Completed `wgpu` raw-upload and reusable single-slot optimization**.
+Smoke runs succeeded on Vulkan device 0, AMD Radeon RX 6600/RADV, and devices 1 and 2, NVIDIA GeForce RTX 3060, using GPU timestamps. Invalid index `u32::MAX` listed the enumerated devices and failed; llvmpipe device 3 was rejected. Complete CUDA and `wgpu` representative regressions retained the canonical output SHA-256 and exact host match. Details and commands are in **Completed direct-Vulkan synthetic flagstat integration spike**.
 
-Independent review subsequently ran the same complete command on adapter 0, `AMD Radeon RX 6600 (RADV NAVI23)`, with `api=Vulkan`, Mesa/RADV 25.2.7, and GPU timestamps. It processed the same 20 batches/2,284 spans/5,324,198,102 logical bytes, matched all host-oracle counters, and produced the established output SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`. This satisfies the actual non-NVIDIA execution evidence goal, though the executable still requires CUDA at build/load time because packaging remains unconditional.
-
-No following slice is approved. Do not start direct mapped decompression, overlap/double buffering, kernel tuning, pileup, direct Vulkan, optional CUDA packaging, or broader portability work unless the project owner selects it.
+The boundary remains deliberate: no whole-file Vulkan streaming, public `--backend vulkan`, reusable grow-only Vulkan slot/production backend abstraction, comparative benchmark, overlap, double buffering, tuning, pileup, CUDA-free packaging, or reference-repository edits were added. No following slice is approved.
 
 ## Purpose of this document
 
@@ -124,24 +122,25 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 The root now contains a bounded streaming Rust/CUDA/`wgpu` flagstat prototype:
 
 - `Cargo.toml` and `Cargo.lock`
-- `build.rs`: invokes `nvcc` and `ar`, then links the native archive, CUDA runtime, and C++ runtime
+- `build.rs`: invokes `nvcc`/`ar` for CUDA and uses build-time `naga` to validate and compile the dedicated direct-Vulkan WGSL shader to embedded SPIR-V
 - `src/main.rs`: explicit CUDA/`wgpu` `gpugeno flagstat` CLI and whole-file orchestration
 - `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
 - `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, direct canonical-byte upload through one grow-only synchronized resource slot, reusable timestamps/readback, and the real portable compute classifier
+- `src/vulkan_spike.rs` and `src/vulkan_flagstat.wgsl`: focused direct-`ash` Vulkan ownership, coherent/non-coherent mapped-memory handling, descriptors/dispatch/readback/timestamps, and the dedicated synthetic SPIR-V classifier source
 - `src/bgzf.rs`: validated BGZF framing, the sequential prefix diagnostic, virtual offsets, and persistent bounded libdeflate workers
 - `src/bam.rs`: BAM header parsing, flagstat counters/text, and independent host classifier
 - `src/bai.rs`: bounded BAI parsing that preserves coordinate-bearing repeated linear work items and derives the flagstat physical-anchor view
 - `src/indexed_batch.rs`: deterministic bounded virtual-offset planning, parallel member decompression/reordering, and disjoint physical batch streaming
 - `cuda/gpugeno_cuda.h` and `cuda/gpugeno_cuda.cu`: public C ABI, reusable CUDA context/buffers, transfer/timing orchestration, and temporary vector-add/upload support
 - `cuda/flagstat.cuh` and `cuda/flagstat.cu`: internal launch declaration plus the flagstat classifier and bounded CUDA record-walk kernel
-- `examples/cuda_vector_add.rs` and `examples/bam_upload.rs`: temporary regression diagnostics
+- `examples/cuda_vector_add.rs`, `examples/bam_upload.rs`, and `examples/vulkan_flagstat_spike.rs`: temporary integration/regression diagnostics
 - `idea.md`: the original pileup-oriented idea
 - `design.md`: this document
 - `cubayes/`: a clean CuBayes reference clone
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is `2bf1028` (`Optimize wgpu raw BAM uploads`); subsequent documentation records the AMD validation and current handoff audit. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint at `HEAD` is the direct-Vulkan synthetic flagstat spike; the prior portable optimization is `2bf1028` (`Optimize wgpu raw BAM uploads`). `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -186,7 +185,7 @@ The development environment may require the full CUDA and Vulkan development too
 
 ### Reproduce the current checkpoint
 
-From `/home/agent/shadowfax`:
+From `/home/agent/gpugeno`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -203,6 +202,8 @@ cargo run --release --example bam_upload -- \
   /agents/shadowfax/data/HG002_chr22.bam \
   --device 0 --max-uncompressed-bytes 4194304
 
+cargo run --release --example vulkan_flagstat_spike -- --device 0
+
 cargo run --release -- flagstat \
   /agents/shadowfax/data/HG002_chr22.bam \
   --backend wgpu --device 0 \
@@ -216,7 +217,7 @@ cargo run --release -- flagstat \
   --benchmark --validate
 ```
 
-All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `wgpu`; both supported backends can be selected explicitly. The examples remain temporary CUDA regression diagnostics.
+All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `wgpu`; both supported public backends can be selected explicitly, while direct Vulkan remains confined to its focused spike module/example. The examples are temporary integration/regression diagnostics.
 
 ### Progress
 
@@ -238,6 +239,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Implement and benchmark `--threads N` with persistent bounded workers.
 - [x] Select raw `wgpu` upload and reusable buffers as the next optimization.
 - [x] Eliminate full host packing, reuse one synchronized resource slot, and benchmark the result.
+- [x] Implement, review, and verify the approved direct-Vulkan synthetic flagstat integration spike.
 
 ## Current decisions
 
@@ -284,6 +286,16 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Completed optimization boundary:** `IndexedBamBatch.data` remains canonical. One synchronized slot reuses grow-only operation-neutral BAM/upload and span buffers separately from flagstat's pipeline, parameters, results/statuses, timestamps, and readbacks. BGZF decompression remains independent of `wgpu` memory.
 - **Observed resolved performance concern:** the first `wgpu` representative run spent about 4.6 seconds packing bytes and 2.2 seconds filling fresh staging buffers; after parallel libdeflate, repeated runs still spent roughly 3.7–3.8 seconds packing and 1.9–2.1 seconds staging. The completed raw-upload/reuse task eliminated packing and reduced the paired staging observation to 314 ms without hiding either cost in GPU timing.
 - **Explicit non-goals:** direct Vulkan, pileup, browser execution, parallel decompression, pipeline overlap, CUDA tuning, and acquiring non-NVIDIA hardware.
+
+### Completed direct-Vulkan synthetic flagstat spike
+
+- **Decided:** Keep direct Vulkan outside `gpugeno flagstat --backend vulkan`. The only supported harness is the focused module test/example, and numeric `--device` there means Vulkan physical-device enumeration index.
+- **Decided:** Accept discrete, integrated, or virtual GPU device types, but reject `CPU`, `OTHER`, and known software-renderer names rather than silently using software. An invalid index reports every enumerated device.
+- **Decided:** Use `ash` 0.38 for direct API ownership. Per-context resources include the loader/instance, logical device/queue, command pool/buffer, fence, descriptor/pipeline layouts, compute pipeline, and optional timestamp query pool. Small per-call buffers and descriptor pools are RAII-owned and destroyed only after fence completion; this intentionally is not a grow-only resource slot.
+- **Decided:** Keep a dedicated Vulkan WGSL source and compile it reproducibly to embedded SPIR-V 1.3 with build-time `naga` 30.0.1. Installed `glslc`, `glslangValidator`, and SPIR-V tools were absent, so no external compiler/runtime dependency was added.
+- **Decided:** Select HOST_VISIBLE memory compatible with each buffer, prefer HOST_COHERENT, and explicitly flush/invalidate the entire allocation for non-coherent memory. Descriptor ranges are exact logical/padded buffer sizes and checked against device limits.
+- **Decided:** Use a two-query GPU timestamp around the compute dispatch when the selected compute queue has nonzero timestamp valid bits and the physical device advertises compute timestamps. Mask wrapping values to the reported valid-bit width and convert with `timestampPeriod`; otherwise report a clearly labeled synchronized host duration.
+- **Explicit non-goals:** whole-file BAM/BAI streaming, public direct-Vulkan backend selection, production backend/resource abstractions, benchmark comparisons, overlap/double buffering/tuning, pileup, CUDA-free packaging, and reference-repository edits.
 
 ### Completed first vertical slice boundaries
 
@@ -837,6 +849,65 @@ Remaining risks and limits:
 - A single slot intentionally serializes map/write, GPU work, and readback. There is no decompression-to-mapped-memory path, overlap, double buffering, multiple in-flight batches, or kernel change.
 - Packing is reported as zero because the pass was deleted; final padding and the raw byte copy are included in staging time. Comparing only the zero packing field while ignoring staging would be misleading.
 
+## Completed direct-Vulkan synthetic flagstat integration spike
+
+### Implementation and ownership
+
+`src/vulkan_spike.rs` adds a deliberately narrow `VulkanContext`, not a production backend. `ash` dynamically loads Vulkan, creates one instance, selects exactly the requested physical-device enumeration index, rejects CPU/`OTHER` and recognized software implementations, chooses a compute queue (preferring compute-only), and creates one logical device. The context owns one command pool/buffer, reusable fence, descriptor-set/pipeline layouts, compute pipeline, and—when supported—a two-entry timestamp query pool. Drop waits idle best-effort and destroys dependent handles in reverse lifetime order before the device and instance. Construction stores each successful handle immediately in a null-initialized RAII owner; buffer allocation/binding failures explicitly release partial buffer/memory pairs. Per-dispatch buffers and their descriptor pool stay alive through fence completion and then drop together. A post-submit fence error attempts `vkDeviceWaitIdle` before borrowed per-call resources can be released.
+
+Five host-visible buffers hold padded canonical BAM bytes, `u32` span starts, per-span 32-counter partials, per-span statuses, and a 16-byte parameter block. Memory selection respects each buffer's memory-type bitmask, prefers HOST_COHERENT, and supports non-coherent types by flushing or invalidating the complete mapped allocation (`VK_WHOLE_SIZE`, offset zero), satisfying atom alignment without assuming coherency. Bindings use exact nonzero ranges and are checked against storage/dispatch/workgroup limits. The shader checks every `block_size` before fixed BAM fields, reports status 1/2/3 for truncated size/small core/span overrun, uses 128 workgroup lanes and 32 atomic partials, and preserves the established flagstat precedence. Rust reads all statuses and partials, widens each through `FlagstatCounters::from_u32_flat`, and leaves policy to the focused caller.
+
+`src/vulkan_flagstat.wgsl` is a dedicated direct-Vulkan source. Build-time `naga` validates it and emits SPIR-V 1.3 to `OUT_DIR`; `include_bytes!` embeds that artifact and runtime checks its word shape/magic before `vkCreateShaderModule`. This was selected because no `glslc`, `glslangValidator`, `spirv-as`, or `spirv-val` was installed, while `naga` 30.0.1 was already locked transitively by `wgpu`. There is no runtime shader compiler or external build tool.
+
+The focused test/example uses four canonical 36-byte BAM records in two record-aligned spans. It covers secondary-over-supplementary precedence, duplicates, paired/read1/read2/proper-pair behavior, the MAPQ 4/5 boundary, QC failure, and unmapped behavior. Every successful per-span result is compared with `bam::classify_records`, then widened/reduced and compared again over the complete byte stream. Removing the final byte produces shader status 3 in the second span; a following valid dispatch proves command-pool/fence reuse and practical batch cleanup. A second test checks an unavailable index and rejects an enumerated llvmpipe CPU device when present.
+
+When `timestampComputeAndGraphics` and nonzero queue-family timestamp valid bits are available, command-buffer timestamps bracket the dispatch. Readback masks wrapping subtraction to the reported valid-bit width and converts ticks using `timestampPeriod`. Otherwise timing is the synchronized submit/fence interval and is labeled `host-synchronized`. All tested physical GPUs supported timestamps, so the fallback is compiled and reviewed but not hardware-exercised.
+
+### Verification and smoke observations
+
+Final verification used:
+
+```bash
+cargo fmt --check
+cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+git diff --check
+
+cargo run --release --example vulkan_flagstat_spike -- --device 0
+cargo run --release --example vulkan_flagstat_spike -- --device 1
+cargo run --release --example vulkan_flagstat_spike -- --device 2
+cargo run --release --example vulkan_flagstat_spike -- --device 4294967295  # expected failure
+cargo run --release --example vulkan_flagstat_spike -- --device 3           # expected llvmpipe rejection
+
+cargo run --release --example cuda_vector_add -- --device 0 --elements 1048576
+cargo run --release --example bam_upload -- \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --device 0 --max-uncompressed-bytes 4194304
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend cuda --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+cargo run --release -- flagstat \
+  /agents/shadowfax/data/HG002_chr22.bam \
+  --backend wgpu --device 0 --threads 8 \
+  --max-uncompressed-bytes 268435456 --benchmark --validate
+```
+
+The two focused tests brought the suite to 21 tests. Device 0 was AMD Radeon RX 6600/RADV and reported a 0.023840 ms GPU-timestamp interval for the four-record dispatch. Devices 1 and 2 were NVIDIA GeForce RTX 3060 and reported 0.008992 ms and 0.008864 ms. These are smoke observations of successful timestamp exercise, not benchmarks or a cross-device comparison. Invalid index `4294967295` failed with all four physical devices listed, and device 3 (`llvmpipe`, CPU) failed as a prohibited software fallback.
+
+The CUDA vector-add and bounded-upload regressions passed. The complete CUDA and AMD/`wgpu` representative runs each processed 20 batches, 2,284 spans, and 5,324,198,102 logical bytes, matched the host oracle, and retained output SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`. These were regression smoke runs, not refreshed comparative benchmarks.
+
+One initial default-parallel `cargo test` run terminated with SIGSEGV while the new direct-Vulkan tests and the existing real-`wgpu` GPU test could execute concurrently against adapter 0. Every test passed with one test thread. A crate-local test mutex now serializes only the three hardware-driver tests; two subsequent ordinary parallel `cargo test` runs passed. This avoids conflating driver/process concurrency with classifier correctness and does not serialize production code.
+
+### Remaining risks and boundary
+
+- The direct path has only synthetic dispatches, not whole-file BAM/BAI streaming or a public backend. Per-call allocation is intentionally unsuitable for production throughput.
+- AMD RADV and NVIDIA proprietary drivers were exercised on Linux. No validation layer was installed, no other OS/vendor was tested, and the non-coherent memory and host-timing fallback branches were not selected by available GPUs.
+- The same-process uncoordinated direct-Vulkan/`wgpu` test crash was mitigated in tests, not root-caused. Concurrent production use of both APIs in one process is outside this spike.
+- Timestamps cover the compute command interval only. This synthetic direct-mapped path has no separately meaningful H2D/D2H benchmark stages and must not be compared with the streaming CUDA/`wgpu` measurements.
+- The public CLI still rejects `--backend vulkan`; no next slice is approved.
+
 ## Superseded candidate: GPU per-block byte sums
 
 This candidate was not implemented. The project owner selected the more ambitious whole-file flagstat slice instead.
@@ -1079,6 +1150,12 @@ The portable host-feeding cost was not inherent to WGSL byte access. BAM is alre
 
 Resource reuse benefited from bounded size classes rather than exact growth: near-cap batches can differ slightly in size, so exact grow-only allocation may still recreate a 256 MiB pair several times. Next-power-of-two classes, clamped to device limits, made the established 256 MiB run settle after its first input allocation while retaining a less-than-two-times capacity bound. The final paired observation cut host packing/staging/setup from 5.844 seconds to 0.406 seconds and wall from 11.510 seconds to 4.786 seconds. It did not justify adding overlap or coupling decompression to GPU memory; one synchronized slot remains the current architecture.
 
+### Direct-Vulkan synthetic flagstat outcome
+
+The direct API integration worked with a much smaller boundary than a third production backend: one `ash` context and per-call resources ran the same bounded record-walk/classifier semantics over a two-span synthetic stream, exposed per-span statuses, and exactly matched the common host oracle on AMD/RADV and NVIDIA. Build-time WGSL-to-SPIR-V with the already-used `naga` version was more reproducible in this environment than introducing an absent system shader tool, while still yielding a dedicated embedded Vulkan module.
+
+Review concentrated on lessons from the CUDA spike: every partially created native object now has a cleanup owner, mapped non-coherent memory has explicit whole-allocation flush/invalidate handling, submitted commands cannot outlive per-call buffers on ordinary error returns, and every fallible Vulkan call carries operation context. Queue timestamp valid bits—not merely query-pool creation—control timestamp support and masking. The first ordinary parallel full-suite run also exposed a same-process driver concurrency SIGSEGV when direct Vulkan and real `wgpu` tests could overlap; serializing only hardware tests made repeated normal runs stable. This does not establish that mixed-API concurrency is safe and does not justify adding the direct path to the public backend yet.
+
 ### CuBayes actor implementation is not authoritative
 
 The project owner clarified that `cubayes/src/cubayes_main_actor.cu` is a faster parallel implementation suspected of bugs that can crash or freeze. It must not define gpugeno's correctness, retry, synchronization, ownership, or shutdown behavior. The non-actor `cubayes_main.cu` and `pipeline.h`, together with the pileup/prescan kernels, are the appropriate current reference.
@@ -1108,7 +1185,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, and actual AMD/Vulkan validation are complete, plausible later experiments include optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. None is currently approved.
+Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, actual AMD/Vulkan validation, and the direct-Vulkan synthetic integration spike are complete, plausible later experiments include optional CUDA packaging, CPU/GPU pipeline overlap, pileup, promoting direct Vulkan to a whole-file public backend, or backend tuning. None is currently approved.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -1120,4 +1197,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-None approved. The `wgpu` raw-upload and reusable single-slot optimization is complete. Wait for the project owner to select the next slice; do not infer one from the deferred possibilities.
+None approved. The direct-Vulkan synthetic flagstat integration spike is complete; the public direct-Vulkan backend remains unimplemented by design. Wait for the project owner to select the next slice and do not infer one from the deferred possibilities.
