@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
-**Last updated:** 2026-09-15  
-**Current phase:** the approved `wgpu` raw-upload and reusable single-slot optimization is complete. It removed the full BAM `Vec<u8>`→`Vec<u32>` packing pass, added bounded grow-only resources, preserved exact counters and CUDA behavior, and materially reduced portable-backend wall time. No following slice is approved.
+**Last updated:** 2026-09-17
+**Current phase:** the `wgpu` raw-upload and reusable single-slot optimization is complete. It removed the full BAM `Vec<u8>`→`Vec<u32>` packing pass, added bounded grow-only resources, preserved exact counters and CUDA behavior, and materially reduced portable-backend wall time. A post-completion representative run also succeeded on an AMD Radeon RX 6600 through RADV/Vulkan, providing actual non-NVIDIA execution evidence. No following slice is approved.
 
 ## First-class fresh-agent workflow
 
@@ -43,9 +43,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 The approved `wgpu` host-feeding optimization is complete in commit history. `IndexedBamBatch.data` remains the canonical Rust-owned byte stream. The portable backend copies those bytes directly into a reusable mapped upload buffer, zeroes only the final zero to three bytes required for a complete storage word, and passes the unpadded logical byte count separately. One explicit synchronized slot owns grow-only power-of-two-class input/upload, span, parameter, result/status, timestamp, and readback resources. Operation-neutral raw BAM/span resources are structurally separate from flagstat's pipeline, parameters, and outputs, leaving a clear boundary for pileup and a future slot pool.
 
-The paired representative run reduced reported packing from 3,808.327 ms to zero, staging writes from 1,919.175 ms to 314.014 ms, resource setup from 116.167 ms to 92.337 ms, and wall time from 11,509.907 ms to 4,785.535 ms. These are paired single-run benchmark-mode observations, not a timing distribution. Exact details and commands are in **Completed `wgpu` raw-upload and reusable single-slot optimization**.
+The paired NVIDIA representative run reduced reported packing from 3,808.327 ms to zero, staging writes from 1,919.175 ms to 314.014 ms, resource setup from 116.167 ms to 92.337 ms, and wall time from 11,509.907 ms to 4,785.535 ms. These are paired single-run benchmark-mode observations, not a timing distribution. Exact details and commands are in **Completed `wgpu` raw-upload and reusable single-slot optimization**.
 
-No following slice is approved. Do not start direct mapped decompression, overlap/double buffering, kernel tuning, pileup, direct Vulkan, optional CUDA packaging, or non-NVIDIA work unless the project owner selects it.
+Independent review subsequently ran the same complete command on adapter 0, `AMD Radeon RX 6600 (RADV NAVI23)`, with `api=Vulkan`, Mesa/RADV 25.2.7, and GPU timestamps. It processed the same 20 batches/2,284 spans/5,324,198,102 logical bytes, matched all host-oracle counters, and produced the established output SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`. This satisfies the actual non-NVIDIA execution evidence goal, though the executable still requires CUDA at build/load time because packaging remains unconditional.
+
+No following slice is approved. Do not start direct mapped decompression, overlap/double buffering, kernel tuning, pileup, direct Vulkan, optional CUDA packaging, or broader portability work unless the project owner selects it.
 
 ## Purpose of this document
 
@@ -113,7 +115,7 @@ Backends are allowed to be optimized independently. This is a comparison of prac
 - **Decided:** A backend must execute a genuine GPU classifier/pileup workload with representative data. It must not hide a CPU implementation behind a backend selector or silently fall back.
 - **Decided:** Results should agree on the canonical representative input and targeted synthetic fixtures so comparisons remain credible. Memory safety, bounded resources, complete normal-file processing, and honest transfer/kernel/readback timing remain required.
 - **Deferred:** Production-grade behavior for every malformed BAM, pathological BAI, unusual oversized span, exhaustive samtools compatibility detail, and sophisticated retry/recovery. Implement these only when needed to avoid crashes on the demonstration corpus or a materially unrealistic performance advantage.
-- **Decided:** Portability must ultimately be demonstrated by running on actual non-NVIDIA hardware. A `wgpu` or Vulkan backend running over Vulkan on this NVIDIA development machine proves a non-CUDA software path, but not the complete hardware claim.
+- **Observed:** Portability has now been demonstrated on actual non-NVIDIA hardware: the complete canonical workload ran through native `wgpu`/Vulkan on an AMD Radeon RX 6600 with exact counters. A CUDA-free build artifact is still required for convenient deployment to machines without the CUDA toolkit/runtime.
 
 ## Current state
 
@@ -175,7 +177,12 @@ A read-only metadata inspection on 2026-09-15 found:
 
 This supports trying linear-index anchors in a later flagstat experiment: this input has enough anchors for many CUDA workgroups, and no individual observed gap approaches a tentative hundreds-of-megabytes batch size. It does not yet prove whole-file coverage for arbitrary valid BAI files.
 
-The development environment may require the full CUDA and Vulkan development toolchains. Avoiding development dependencies is not a prototype goal.
+Observed additionally on 2026-09-17:
+
+- `wgpu` adapter 0 was `AMD Radeon RX 6600 (RADV NAVI23)`, Vulkan discrete GPU, Mesa/RADV 25.2.7
+- The canonical `wgpu` workload completed exactly on that AMD adapter; CUDA remained available separately through NVIDIA devices
+
+The development environment may require the full CUDA and Vulkan development toolchains. Avoiding development dependencies is not yet a prototype goal.
 
 ### Reproduce the current checkpoint
 
@@ -664,8 +671,8 @@ The immediately following CUDA regression run produced identical counters and co
 
 ### Remaining `wgpu` risks
 
-- Actual non-NVIDIA hardware is still required. The observed Vulkan-on-NVIDIA path only establishes that CUDA is not being called.
-- **Packaging portability gap:** `build.rs` still invokes `nvcc` unconditionally, and even `--backend wgpu` uses an executable dynamically linked to `libcudart.so.12` and `libstdc++`. A normal AMD/Intel machine without the CUDA toolkit therefore cannot yet build or launch the portable backend. Before non-NVIDIA validation, make CUDA compilation/linkage an optional Cargo feature or deliberately provision the CUDA toolkit and record that limitation.
+- Actual non-NVIDIA execution is now observed on AMD Radeon RX 6600 through RADV/Vulkan with exact representative output. Broader vendor/OS coverage is still untested.
+- **Packaging portability gap:** `build.rs` still invokes `nvcc` unconditionally, and even `--backend wgpu` uses an executable dynamically linked to `libcudart.so.12` and `libstdc++`. A normal AMD/Intel machine without the CUDA toolkit therefore cannot yet build or launch the portable backend. Make CUDA compilation/linkage optional before distributing a genuinely standalone portable artifact.
 - The default test suite now executes a small real `wgpu` dispatch and therefore requires at least one hardware adapter at enumerated index 0 in addition to the project's existing CUDA build-tool requirement.
 - Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
 - The initial implementation's fresh per-batch buffers and full byte-to-word packing pass were removed by the completed raw-upload/reuse optimization. The current slot remains intentionally synchronized; direct mapped decompression and pipeline overlap are still deferred.
@@ -790,7 +797,9 @@ target/release/gpugeno flagstat /agents/shadowfax/data/HG002_chr22.bam \
 
 The separately reported packing+staging+setup sum fell from 5,843.669 ms to 406.351 ms (93.0%). Only packing removal and host resource feeding are attributed to this change; the lower GPU timestamp and batch/validation observations are not claimed as kernel or decompression improvements. Wall includes adapter/context initialization, submission/map waits, validation, and other orchestration not represented by the summed stage labels.
 
-Both runs retained exactly 20 batches, 2,284 spans from 2,285 anchors, 82,360 decompressed members, 5,324,198,102 logical alignment bytes, and 1,645,336,143 compressed bytes read. Both matched all host-oracle counters. Their 16-line outputs were byte-identical with SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`.
+Both NVIDIA runs retained exactly 20 batches, 2,284 spans from 2,285 anchors, 82,360 decompressed members, 5,324,198,102 logical alignment bytes, and 1,645,336,143 compressed bytes read. Both matched all host-oracle counters. Their 16-line outputs were byte-identical with SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`.
+
+A subsequent independent full run used `AMD Radeon RX 6600 (RADV NAVI23)`, `api=Vulkan`, `device_type=DiscreteGpu`, Mesa/RADV 25.2.7, and `timing_source=gpu-timestamps`. It retained the same coverage, matched the host oracle, and produced the same output SHA-256. Its single-run smoke observations were batch build 2,467.152 ms, staging writes 355.333 ms, resource setup 23.914 ms, H2D 380.895 ms, kernel 58.435 ms, D2H 0.049 ms, GPU stage 439.379 ms, host validation 911.785 ms, and wall 5,574.969 ms. This is the first actual non-NVIDIA hardware evidence; it is not a controlled vendor benchmark because host conditions and adapter differ from the paired NVIDIA run.
 
 ### Verification, regressions, and remaining risks
 
@@ -822,7 +831,7 @@ All 19 tests passed. The CUDA representative regression retained the same covera
 
 Remaining risks and limits:
 
-- The optimization was validated only on the documented NVIDIA/Vulkan adapter. It does not add non-NVIDIA evidence or change the CUDA packaging gap.
+- The optimization was validated in its paired measurement on the documented NVIDIA/Vulkan adapter and independently on AMD/RADV/Vulkan. It does not change the CUDA packaging gap or establish broader vendor/OS coverage.
 - The mapped-upload approach depends on `wgpu`'s portable buffer mapping/copy semantics, but only the timestamp-capable path was exercised. Host-synchronized timing fallback still compiles and retains its labels but was not run.
 - Power-of-two size classes trade bounded retained slack (less than one requested size) for avoiding repeated near-cap growth. A growth can transiently retain old and new handles; this remains bounded but is not a hard process-RSS measurement.
 - A single slot intentionally serializes map/write, GPU work, and readback. There is no decompression-to-mapped-memory path, overlap, double buffering, multiple in-flight batches, or kernel change.
@@ -1050,11 +1059,11 @@ The experiment also showed that batching cannot be treated as backend-neutral ov
 
 The project owner clarified that gpugeno supports a funding proposal's cross-platform claim rather than aiming to become an externally used bioinformatics application. This supersedes the implicit production-quality standard that had begun to drive discussion of rare BAI gaps, exhaustive overlap recovery, and malformed input. Representative correctness is still necessary—otherwise performance could come from doing less work—but it is a means of making the portability comparison believable.
 
-This shifts the immediate priority away from additional CUDA pileup correctness machinery. With a complete CUDA flagstat baseline already available, a native `wgpu` flagstat backend is the smallest useful proof that the same realistic operation can execute without CUDA. Direct Vulkan and pileup remain relevant later. Because `wgpu` on Linux/NVIDIA will likely select Vulkan on an NVIDIA device, final proposal evidence still requires access to an AMD, Intel, Apple, or other non-NVIDIA GPU and recording its adapter/backend and results.
+This shifted the immediate priority away from additional CUDA pileup correctness machinery. With a complete CUDA flagstat baseline already available, native `wgpu` flagstat was the smallest useful proof that the same realistic operation could execute without CUDA. The initial run used Vulkan on NVIDIA; a later independent run completed the same canonical workload exactly on an AMD Radeon RX 6600 through RADV/Vulkan, satisfying the actual non-NVIDIA execution goal. Direct Vulkan and pileup remain relevant later.
 
 ### Native `wgpu` flagstat outcome
 
-The selected portability slice succeeded without changing the indexed stream: the same batches and span starts feed a real WGSL compute pipeline, and the complete representative output matched both the host oracle and CUDA exactly. On the development machine, `wgpu` selected Vulkan on an RTX 3060 and exposed GPU timestamps for all three measured GPU stages. This establishes a non-CUDA API implementation but does not supersede the requirement for a run on non-NVIDIA hardware.
+The selected portability slice succeeded without changing the indexed stream: the same batches and span starts feed a real WGSL compute pipeline, and the complete representative output matched both the host oracle and CUDA exactly. The first development-machine run selected Vulkan on an RTX 3060 and exposed GPU timestamps for all three measured GPU stages. A later independent run selected an AMD Radeon RX 6600 via RADV/Vulkan and again produced exact canonical output, establishing both a non-CUDA API implementation and actual non-NVIDIA execution.
 
 The experiment also disproved any assumption that portable byte-addressing and reduction would be free host work. Packing 5.3 GiB of BAM bytes into WGSL-readable words and writing fresh staging buffers consumed several seconds, all now reported explicitly. Reuse/direct packing are optimization candidates, not correctness changes. CPU/software adapters are visible in enumeration (llvmpipe was adapter 3) and must be rejected to keep backend claims honest.
 
@@ -1099,7 +1108,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, bounded parallel decompression, and the raw-upload/reusable-slot optimization are complete, plausible later experiments include actual non-NVIDIA validation, optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. None is currently approved.
+Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, and actual AMD/Vulkan validation are complete, plausible later experiments include optional CUDA packaging, CPU/GPU pipeline overlap, pileup, direct Vulkan flagstat, or backend tuning. None is currently approved.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
