@@ -997,7 +997,7 @@ Review corrected the historical per-call ownership design rather than carrying i
 
 Remaining risks are bounded and explicit: available hardware selected the GPU-timestamp/coherent paths, so the three-submission host-timing fallback and non-coherent flush/invalidate branch were reviewed but not selected by smoke devices; no Vulkan validation layer or other OS/vendor was tested; unusual sparse BAI and oversized-span behavior retain the existing clear-error policy; external samtools was unavailable; CUDA build/linkage remains unconditional; and the mixed Vulkan/`wgpu` driver SIGSEGV risk is mitigated only for tests by `GPU_TEST_LOCK`, not root-caused for concurrent production API use. No multiple slots, overlap, double buffering, allocator, pileup, packaging change, or reference-repository edit was added. No next slice is approved.
 
-
+## Superseded candidate: GPU per-block byte sums
 
 This candidate was not implemented. The project owner selected the more ambitious whole-file flagstat slice instead.
 
@@ -1124,7 +1124,7 @@ The duplicate traversal is acceptable because it avoids a serial host pass that 
 
 ### Current portable direction
 
-- Both completed GPU backends preserve index-anchored device-side record discovery.
+- All three completed GPU backends preserve index-anchored device-side record discovery.
 - Treat a BAI virtual offset as `(compressed BGZF offset << 16) | uncompressed offset`.
 - Convert virtual offsets into offsets in each decompressed batch.
 - Deduplicate or otherwise handle repeated BAI offsets without dropping data.
