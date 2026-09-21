@@ -110,7 +110,11 @@ impl Drop for BatchProducer {
 /// never replaces the root that caused cancellation.
 pub(crate) fn cancel_with_root(producer: BatchProducer, root: String) -> String {
     match producer.disconnect_and_join() {
-        Ok(_) => root,
+        Ok(exit) if exit.kind == ProducerExitKind::ReceiverDropped => root,
+        Ok(exit) => format!(
+            "{root}; secondary producer protocol error: expected ReceiverDropped during cancellation, got {:?}",
+            exit.kind
+        ),
         Err(panic) => format!("{root}; secondary cleanup error: {panic}"),
     }
 }
@@ -419,6 +423,38 @@ mod tests {
     fn compile_time_send_assertions_cover_moved_stream_types() {
         super::compile_time_send_assertions();
     }
+    #[test]
+    fn cancellation_preserves_root_and_reports_unexpected_exit_kind() {
+        fn producer_with_exit(kind: ProducerExitKind) -> BatchProducer {
+            let (sender, receiver) = mpsc::sync_channel::<ProducerMessage>(0);
+            drop(sender);
+            let handle = thread::spawn(move || ProducerExit {
+                kind,
+                stats: ProducerStats::default(),
+            });
+            BatchProducer {
+                receiver: Some(receiver),
+                handle: Some(handle),
+            }
+        }
+
+        let root = "injected consumer failure".to_string();
+        assert_eq!(
+            cancel_with_root(
+                producer_with_exit(ProducerExitKind::ReceiverDropped),
+                root.clone()
+            ),
+            root
+        );
+        let unexpected = cancel_with_root(
+            producer_with_exit(ProducerExitKind::Finished),
+            "injected consumer failure".to_string(),
+        );
+        assert!(unexpected.contains("injected consumer failure"));
+        assert!(unexpected.contains("expected ReceiverDropped"));
+        assert!(unexpected.contains("Finished"));
+    }
+
     #[test]
     fn ordered_delivery_requires_explicit_eof() {
         let state = LiveState::new();

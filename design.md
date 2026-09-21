@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
-**Last updated:** 2026-09-18
-**Current phase:** the owner approved the implementation-and-correctness half of the bounded CPU/GPU overlap experiment. The selected design moves the existing `DisjointBamStream` to one named producer thread and hands batches to the main-thread consumer through `sync_channel(0)`, preserving one synchronous GPU slot while allowing construction of batch N+1 during validation/backend work for batch N. This task stops after implementation, deterministic lifecycle/equivalence tests, and five-backend correctness preflights; full before/after/samtools performance measurement is deferred until full-agent review.
+**Last updated:** 2026-09-21
+**Current phase:** the bounded CPU/GPU overlap implementation-and-correctness checkpoint is complete and has passed full-agent concurrency review. One named producer owns the existing indexed stream and hands each batch through a zero-capacity rendezvous to the main-thread synchronous backend, retaining one GPU slot and at most two complete canonical host batches. Deterministic lifecycle/equivalence tests and five complete CUDA/Direct Vulkan/`wgpu` correctness preflights passed exactly. The full controlled before/after/samtools performance campaign remains a separate unapproved task.
 
 ## First-class fresh-agent workflow
 
@@ -41,11 +41,13 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The complete public Direct Vulkan backend and controlled three-backend HG002 comparison remain the accepted baseline. The owner has now approved only the first half of the bounded overlap experiment: implementation and correctness evidence. The fixed architecture is one already-open `DisjointBamStream` moved to a named producer, a zero-capacity rendezvous channel, validation/reduction and GPU contexts retained on the main thread, explicit receiver-drop-before-producer-join cancellation, and exactly one synchronous backend resource slot. At most two complete canonical host batches may exist: the consumer's current batch and the producer-owned next batch blocked at rendezvous.
+The bounded overlap implementation-and-correctness checkpoint is complete in commit history. `DisjointBamStream::open` remains on the main thread so metadata/open error order and `anchor_count` are unchanged; the opened stream then moves to one named producer started immediately before main-thread backend construction. `sync_channel(0)` carries explicit `Batch`, `StreamError`, and `Eof` messages. A disconnect is never EOF. Validation, all three backend contexts/calls, reduction, accounting, and output remain on the main thread, and every backend retains one synchronous resource slot.
 
-The implementation must preserve exact batches, coverage, counters, output hash, backend timing meanings, and root errors. New benchmark-only fields must report consumer receive waits, producer rendezvous backpressure, producer lifetime, and that overlapping work sums do not add to wall. Explicit non-goals are multiple GPU slots/submissions, a buffered or unbounded queue, direct mapped decompression, backend/kernel tuning, pileup, multi-GPU, optional CUDA packaging, async runtimes, coverage-policy changes, and reference-repository edits.
+The rendezvous channel permits exactly the consumer's current complete batch plus one producer-owned completed next batch blocked at send; a buffered capacity-one channel was rejected because it could permit three. At the 256 MiB cap this adds a second approximately 256 MiB logical canonical host batch, subject to `Vec` capacity, metadata, worker, backend upload, and device-buffer caveats. On cancellation, the receiver is dropped before producer join. Stream, validation, backend, and consumer root errors are preserved; producer panic or an unexpected exit kind is appended as secondary cleanup/protocol context. Producer teardown explicitly drops the stream and joins its persistent BGZF workers before reporting lifetime. A non-panicking RAII fallback prevents detachment during unwind.
 
-This approved task stops after code, deterministic normal/error/panic/backpressure/equivalence tests, repeated standard checks, and complete `--validate` correctness preflights on CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA. A full agent must review concurrency and lifetime behavior before a separate benchmark/documentation task is approved. The detailed reviewed implementation handoff is currently `/tmp/gpugeno-overlap-implementation-handoff.md`; preserve its architecture but do not run its full 11-command performance campaign in this first task.
+Existing stage metrics retain their work-sum meanings. Benchmark mode additionally reports first/later/EOF consumer waits, first/later/terminal producer rendezvous waits, and producer lifetime, plus an explicit warning that batch build, validation, backend host stages, and GPU stages overlap and must not be summed into wall. Normal stdout is unchanged.
+
+The implementation has passed deterministic ordering, strict two-live-item backpressure, stream error, cancellation-while-building/sending, producer panic, protocol-disconnect, compile-time `Send`, and real sequential-versus-rendezvous BAM/BAI equivalence tests. Five complete `--benchmark --validate` preflights on CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA retained exact canonical coverage, host counters, byte-identical output, and SHA-256. These validation-enabled runs are correctness smoke observations, not performance evidence; the full before/after/samtools campaign remains deferred and is not approved. Exact details are in **Completed bounded CPU/GPU overlap implementation and correctness checkpoint**.
 
 ## Purpose of this document
 
@@ -123,7 +125,7 @@ The root now contains a bounded streaming Rust/CUDA/Direct-Vulkan/`wgpu` flagsta
 
 - `Cargo.toml` and `Cargo.lock`
 - `build.rs`: invokes `nvcc`/`ar` for CUDA and uses build-time `naga` to validate and compile the dedicated direct-Vulkan WGSL shader to embedded SPIR-V
-- `src/main.rs`: explicit CUDA/Direct Vulkan/`wgpu` `gpugeno flagstat` CLI and whole-file orchestration
+- `src/main.rs` and `src/batch_producer.rs`: explicit CUDA/Direct Vulkan/`wgpu` CLI orchestration plus the bounded rendezvous producer that overlaps next-batch construction with one synchronous backend slot
 - `src/lib.rs`: safe Rust owner around the opaque CUDA C context, including flagstat, vector-add, and raw upload operations
 - `src/wgpu_backend.rs` and `src/flagstat.wgsl`: native `wgpu` adapter/device ownership, direct canonical-byte upload through one grow-only synchronized resource slot, reusable timestamps/readback, and the real portable compute classifier
 - `src/vulkan_backend.rs` and `src/vulkan_flagstat.wgsl`: public direct-`ash` Vulkan ownership, one synchronized grow-only resource slot, coherent/non-coherent mapped-memory handling, transfer/compute barriers, per-stage dispatch/readback, timestamps, and the dedicated SPIR-V classifier
@@ -140,7 +142,7 @@ The root now contains a bounded streaming Rust/CUDA/Direct-Vulkan/`wgpu` flagsta
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint at `HEAD` is the public direct-Vulkan whole-file flagstat backend; the prior synthetic checkpoint is preserved below as superseded history. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is the reviewed bounded CPU/GPU overlap orchestration built on the public direct-Vulkan whole-file backend; the prior synthetic Vulkan checkpoint is preserved below as superseded history. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -246,6 +248,8 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Select raw `wgpu` upload and reusable buffers as the next optimization.
 - [x] Eliminate full host packing, reuse one synchronized resource slot, and benchmark the result.
 - [x] Implement, review, and verify the approved complete public Direct Vulkan whole-file flagstat backend.
+- [x] Implement and fully review bounded CPU/GPU overlap with a strict two-host-batch rendezvous and exact five-backend correctness evidence.
+- [ ] Run the deferred controlled no-overlap/overlap/samtools performance campaign after owner approval.
 
 ## Current decisions
 
@@ -256,7 +260,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** CuBayes remains the authoritative reference for the broader BAM/pileup project, but mainline `cubayes/` has no flagstat kernel.
 - **Decided:** Match the useful flagstat behavior closely; do not reproduce accidental bugs in the old stream wrappers.
 - **Decided:** Default result output should look like `samtools flagstat`.
-- **Deferred:** Investigating exact compatibility with a particular samtools release. Tests previously found difficult-to-match samtools behavior, but the details are not currently remembered and may have concerned mpileup rather than flagstat.
+- **Observed:** The canonical `HG002_chr22.bam` flagstat output is byte-identical to samtools 1.24 and all three GPU backends. Broader version/corpus compatibility remains deferred; canonical agreement does not establish every samtools edge case.
 
 ### Input and streaming
 
@@ -268,6 +272,9 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** Use record-aligned BAI virtual offsets to expose many independent GPU work spans. Do not begin with a CPU-generated offset for every BAM record.
 - **Working decision:** All GPU backends should receive deterministic, identical outer batches and spans. A backend may subdivide them internally.
 - **Decided:** Use a fixed 256 MiB default uncompressed batch cap and expose `--max-uncompressed-bytes`.
+- **Decided:** Whole-file orchestration opens the indexed stream on the main thread, then moves it to one named producer before backend construction. A zero-capacity rendezvous delivers explicit batch/error/EOF messages while validation and one synchronous backend slot remain on the main thread.
+- **Decided:** The overlap envelope permits at most two complete canonical host batches. Receiver disconnect precedes producer join on every cancellation path, and disconnect alone is never clean EOF.
+- **Decided:** Existing stage timings remain work sums that may now overlap. Benchmark output reports producer/consumer wait telemetry and explicitly forbids summing overlapping stages to infer wall time.
 
 ### Completed CUDA flagstat vertical slice
 
@@ -312,7 +319,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - **Decided:** The dedicated 128-lane Vulkan classifier retains the proven precedence, little-endian byte extraction, bounded offset table, checks before every fixed-field read, and statuses 1/2/3. Any nonzero status fails the backend call with span, numeric status, and description; no partial counters are reduced.
 - **Decided:** Benchmark output separately labels Vulkan host staging writes, resource setup/growth, zero removed packing, and `raw-little-endian` mode. No Vulkan fallback to `wgpu`, CUDA, or a host classifier is permitted.
 
-
+### Completed first vertical slice boundaries
 
 - **Decided:** Process only one bounded prefix batch, not the entire BAM.
 - **Working default:** Cap the batch at 256 MiB of uncompressed bytes, configurable by the temporary example.
@@ -636,7 +643,7 @@ During the 9.07-second command, 134 of 138 samples reported nonzero GPU utilizat
 - Exact coverage is demonstrated for `HG002_chr22.bam`, not every valid sparse or unusual BAI. Oversized anchor gaps currently fail clearly.
 - The host oracle is a separate Rust implementation, but there is no external samtools result yet.
 - The shared index and BGZF mapping preserve what pileup needs, but pileup still needs an explicit policy for left-overlapping reads, right-side data extent, and a completion signal such as the status used by current CuBayes prescan/pileup.
-- Batch construction now uses a bounded persistent worker pool but remains stage-sequential with GPU execution: there is no double buffering or CPU/GPU overlap. Boundary members are intentionally reread for simplicity.
+- At this CUDA-only checkpoint, batch construction remained stage-sequential with GPU execution. The later bounded rendezvous producer superseded that orchestration while retaining one GPU slot. Boundary members are still intentionally reread for simplicity.
 
 ## Completed native `wgpu` whole-file flagstat vertical slice
 
@@ -702,7 +709,7 @@ The immediately following CUDA regression run produced identical counters and co
 - **Packaging portability gap:** `build.rs` still invokes `nvcc` unconditionally, and even `--backend wgpu` uses an executable dynamically linked to `libcudart.so.12` and `libstdc++`. A normal AMD/Intel machine without the CUDA toolkit therefore cannot yet build or launch the portable backend. Make CUDA compilation/linkage optional before distributing a genuinely standalone portable artifact.
 - The default test suite now executes a small real `wgpu` dispatch and therefore requires at least one hardware adapter at enumerated index 0 in addition to the project's existing CUDA build-tool requirement.
 - Timestamp fallback code compiled and is explicit but was not exercised on this timestamp-capable adapter.
-- The initial implementation's fresh per-batch buffers and full byte-to-word packing pass were removed by the completed raw-upload/reuse optimization. The current slot remains intentionally synchronized; direct mapped decompression and pipeline overlap are still deferred.
+- The initial implementation's fresh per-batch buffers and full byte-to-word packing pass were removed by the completed raw-upload/reuse optimization. The `wgpu` GPU slot remains intentionally synchronized; direct mapped decompression and multiple in-flight GPU submissions remain deferred. Shared host next-batch construction was later overlapped through the bounded rendezvous producer.
 - As before, representative correctness does not imply production handling of every malformed BAM or pathological BAI.
 
 ## Completed bounded parallel libdeflate experiment
@@ -1100,9 +1107,37 @@ Ratios use the same `row median / Direct Vulkan AMD median` definition. Host fee
 
 After the controlled backend comparison, `samtools 1.24` became available at `/usr/local/bin/samtools`. A small follow-up used one warmup and five warm-cache shell-elapsed runs of `samtools flagstat -@ 8 /agents/shadowfax/data/HG002_chr22.bam`, followed by the same one-warmup/five-run sequence for the release `gpugeno` CUDA command with eight workers and the 256 MiB cap. All outputs were byte-identical to each other and to the established SHA-256. Bash `time` reported samtools median 2.399 s (2.382–2.412) and gpugeno CUDA median 2.350 s (2.322–2.373), making gpugeno 2.0% lower in this exploratory sample. The tools were not interleaved and there were only five observations, so this establishes current warm-cache parity rather than a definitive win.
 
-The evidence-based leading optimization hypothesis is bounded CPU/GPU pipeline overlap, not classifier-kernel tuning. Current execution fully builds each batch before synchronously staging and processing it; a background stream producer with one queued next host batch could overlap batch `N+1` construction with batch `N` backend work while retaining one synchronized GPU slot. Median batch construction is about 1.78–1.82 s, while the separately measured GPU stage is 0.273–0.447 s and portable staging adds about 0.31–0.32 s on NVIDIA. Kernel-only tuning can recover at most the current 51–82 ms kernel total, whereas overlap can potentially hide much of the larger transfer/staging interval. This remains a hypothesis until a bounded two-host-batch experiment measures CPU/memory contention and fill/drain overhead.
+The evidence-based leading optimization hypothesis was bounded CPU/GPU pipeline overlap, not classifier-kernel tuning. The selected implementation uses a producer-owned next host batch blocked at a rendezvous while retaining one synchronized GPU slot. The prior medians were about 1.78–1.82 s for batch construction, 0.273–0.447 s for the GPU stage, 0.31–0.32 s for portable NVIDIA host staging, and only 0.051–0.082 s for the kernel. Kernel-only tuning could recover little compared with work potentially hidden by overlap. The bounded implementation and correctness evidence now exist; its performance payoff remains unmeasured until the separate controlled campaign.
 
-For one-shot portable CLI latency, overlap alone may not close the entire samtools gap. On NVIDIA, roughly 0.83–0.88 s of the `wgpu`/Direct Vulkan median wall is not represented by metadata, batch build, staging, resource setup, and GPU-stage sums; adapter/device/pipeline initialization and other orchestration are likely contributors but have not been isolated. A following portable optimization should first instrument initialization, then evaluate Vulkan pipeline caching or context reuse where the invocation model permits it. Direct decompression into mapped upload memory is lower priority until overlap shows that host staging remains exposed rather than hidden. No optimization slice is approved by this analysis.
+For one-shot portable CLI latency, overlap alone may not close the entire samtools gap. On NVIDIA, roughly 0.83–0.88 s of the `wgpu`/Direct Vulkan median wall is not represented by metadata, batch build, staging, resource setup, and GPU-stage sums; adapter/device/pipeline initialization and other orchestration are likely contributors but have not been isolated. A following portable optimization should first instrument initialization, then evaluate Vulkan pipeline caching or context reuse where the invocation model permits it. Direct decompression into mapped upload memory is lower priority until overlap shows that host staging remains exposed rather than hidden. No optimization slice was approved by this analysis.
+
+## Completed bounded CPU/GPU overlap implementation and correctness checkpoint
+
+### Implementation and bounded lifetime model
+
+Commit `d192f9c` added the binary-internal `src/batch_producer.rs` and rewired only shared orchestration in `src/main.rs`; backend internals and reference repositories were unchanged. The main thread still performs metadata, anchor planning, and `DisjointBamStream::open`, then moves the open stream into `gpugeno-batch-producer` through `std::thread::Builder`. The producer starts before backend creation, so first-batch construction can overlap some device/context startup, but the zero-capacity rendezvous prevents it from beginning batch two until the main thread receives batch one. Steady state overlaps construction of N+1 with validation, host staging, synchronous GPU work, and reduction for N. Fill and drain remain exposed.
+
+The producer protocol has explicit batch, stream-error, and EOF messages over `sync_channel(0)`. The rendezvous has no queued element: at most one complete batch is owned by the consumer and one completed next batch remains producer-owned while `send` blocks. The producer cannot construct a third. This increases logical canonical host batch storage from roughly one 256 MiB batch to two, not a process-RSS hard bound: `Vec` slack, member/span metadata, eight bounded worker payloads/stacks/libdeflate state, and existing portable upload/device buffers are additional.
+
+Every normal/error path disconnects the receiver before joining. Backend-construction, validation, backend, and injected consumer failures retain their root error while expected `ReceiverDropped` cancellation is ignored. Stream errors are moved intact and require the matching `ErrorReported` exit. Channel disconnect without explicit EOF is a protocol error. Producer panic is the root when no earlier error exists and secondary cleanup context otherwise. Full-agent review tightened `cancel_with_root` so an unexpected non-`ReceiverDropped` cancellation exit is also reported as secondary protocol context rather than hidden. `BatchProducer::Drop` disconnects and joins without panicking as a last-resort unwind guard. Cancellation cannot forcibly interrupt a native libdeflate call already executing; join waits for the current bounded `next_batch` to finish or unwind.
+
+### Timing semantics and tests
+
+Existing `batch_build`, validation, backend host-stage, H2D/kernel/D2H, and wall fields retain their prior definitions. New benchmark-only fields are `consumer_first_batch_wait`, `consumer_next_batch_wait`, `consumer_eof_wait`, `producer_first_send_wait`, `producer_backpressure_wait`, `producer_terminal_send_wait`, and `producer_lifetime`. Producer lifetime includes explicit stream/worker teardown. Output states that these overlapping work sums must not be added to infer wall; no unobservable “overlap saved” number is emitted.
+
+The binary test target now has 11 producer/orchestration tests in addition to 23 library tests. They cover compile-time `Send` assertions without unsafe impls; ordered batches and explicit EOF; a deterministic peak of exactly two live items with the third not built during blocked send; errors before/after a batch; consumer-root cancellation while blocked sending; disconnect while building; producer panic; disconnect-not-EOF; unexpected cancellation exit context; real synthetic BAM/BAI sequential-versus-producer equality for every deterministic batch field except time plus concatenated bytes/counters; and open/corrupt-BGZF errors. Two consecutive normal test-suite runs passed.
+
+### Complete correctness evidence
+
+The pre-implementation release binary is preserved ephemerally as `/tmp/gpugeno-no-overlap-f955eea` with SHA-256 `16bb88703fd03ca1a6b70d902c67445c939cf441fa557d84c24b9ccb367b6f07`. Final checks passed `cargo fmt --all -- --check`, two `cargo test` runs, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. An invalid CUDA device after producer startup failed without output or a hang, exercising backend-construction cancellation.
+
+One complete `--benchmark --validate` canonical preflight passed on each of CUDA device 0, Direct Vulkan physical devices 0/1, and `wgpu` adapters 0/1. Every run reported 20 batches, 2,284 spans, 2,285 anchors, 82,360 decompressed blocks, 5,324,198,102 logical bytes, 1,645,336,143 compressed bytes read, and an exact host match. All five stdout files were byte-identical with SHA-256 `dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113`.
+
+The validation-enabled smoke runs showed nonnegative/plausible overlap telemetry but are not suitable for speedup conclusions because validation competes with the producer. First-batch consumer wait was 36.019 ms for CUDA and at most 0.009 ms on the portable rows; summed later-batch wait ranged from 80.524 to 1,084.756 ms; first-send wait ranged from 0.005 to 460.981 ms; and producer lifetime ranged from 2,852.750 to 3,380.549 ms. The data demonstrate the intended rendezvous activity, not whether unvalidated wall time improved.
+
+### Remaining boundary
+
+No multiple GPU slots/submissions, buffered or unbounded queue, direct mapped decompression, backend/kernel tuning, pileup, multi-GPU, packaging change, async runtime, coverage-policy change, or reference edit was added. The known inability to force-cancel a permanently stuck native decompressor and the pre-existing BGZF worker-panic robustness caveat remain. A separate controlled baseline/candidate/samtools performance campaign is the next relevant experiment, but it is not approved; no performance claim should be made from this checkpoint.
 
 ## Superseded candidate: GPU per-block byte sums
 
@@ -1382,7 +1417,7 @@ The prototype was initially called `sfxproto`. Before application code was creat
 
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, actual AMD/Vulkan validation, and the complete public direct-Vulkan backend are complete, plausible later experiments include optional CUDA packaging, CPU/GPU pipeline overlap, pileup, or backend tuning. None is currently approved.
+Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, actual AMD/Vulkan validation, the complete public direct-Vulkan backend, and the bounded overlap implementation/correctness checkpoint are complete, plausible later experiments include the controlled overlap performance evaluation, optional CUDA packaging, pileup, or backend tuning. None is currently approved.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 
@@ -1394,4 +1429,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-The bounded CPU/GPU overlap implementation-and-correctness task is approved and in progress under the architecture and boundary in **Current handoff**. Stop after a clean implementation commit and correctness evidence; do not begin the deferred full performance campaign until a full-agent review accepts the concurrency work.
+The bounded CPU/GPU overlap implementation and five-backend correctness checkpoint are complete and accepted after full-agent review. The full controlled baseline/candidate/samtools performance campaign is not approved; wait for the owner rather than inferring it as the next task.
