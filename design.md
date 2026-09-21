@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-21
-**Current phase:** the bounded CPU/GPU overlap implementation-and-correctness checkpoint is complete and has passed full-agent concurrency review. One named producer owns the existing indexed stream and hands each batch through a zero-capacity rendezvous to the main-thread synchronous backend, retaining one GPU slot and at most two complete canonical host batches. Deterministic lifecycle/equivalence tests and five complete CUDA/Direct Vulkan/`wgpu` correctness preflights passed exactly. The full controlled before/after/samtools performance campaign remains a separate unapproved task.
+**Current phase:** the owner approved the controlled performance-evaluation half of the bounded CPU/GPU overlap experiment. The reviewed implementation retains one GPU slot and a strict two-host-batch rendezvous; the active task now compares the preserved no-overlap binary, the overlap candidate, and samtools through warm-cache interleaved runs across CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA. No implementation changes or tuning are approved in this measurement task.
 
 ## First-class fresh-agent workflow
 
@@ -41,13 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The bounded overlap implementation-and-correctness checkpoint is complete in commit history. `DisjointBamStream::open` remains on the main thread so metadata/open error order and `anchor_count` are unchanged; the opened stream then moves to one named producer started immediately before main-thread backend construction. `sync_channel(0)` carries explicit `Batch`, `StreamError`, and `Eof` messages. A disconnect is never EOF. Validation, all three backend contexts/calls, reduction, accounting, and output remain on the main thread, and every backend retains one synchronous resource slot.
+The bounded overlap implementation and five-backend correctness checkpoint are accepted. The owner has now approved only its controlled performance evaluation. The implementation architecture and correctness evidence remain exactly as documented below; this task must not modify source code, tune backends, or change benchmark meaning.
 
-The rendezvous channel permits exactly the consumer's current complete batch plus one producer-owned completed next batch blocked at send; a buffered capacity-one channel was rejected because it could permit three. At the 256 MiB cap this adds a second approximately 256 MiB logical canonical host batch, subject to `Vec` capacity, metadata, worker, backend upload, and device-buffer caveats. On cancellation, the receiver is dropped before producer join. Stream, validation, backend, and consumer root errors are preserved; producer panic or an unexpected exit kind is appended as secondary cleanup/protocol context. Producer teardown explicitly drops the stream and joins its persistent BGZF workers before reporting lifetime. A non-panicking RAII fallback prevents detachment during unwind.
+The comparison uses preserved `/tmp/gpugeno-no-overlap-f955eea`, the reviewed overlap candidate at the current source checkpoint, and samtools 1.24. It covers CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA with fixed 256 MiB batches and eight decompression workers. One warmup per command and seven measured rounds must interleave all eleven commands in rotating order, one process at a time, under an explicitly warm filesystem cache. Every output and gpugeno coverage field must remain exact; no failed/outlier run may be silently replaced.
 
-Existing stage metrics retain their work-sum meanings. Benchmark mode additionally reports first/later/EOF consumer waits, first/later/terminal producer rendezvous waits, and producer lifetime, plus an explicit warning that batch build, validation, backend host stages, and GPU stages overlap and must not be summed into wall. Normal stdout is unchanged.
-
-The implementation has passed deterministic ordering, strict two-live-item backpressure, stream error, cancellation-while-building/sending, producer panic, protocol-disconnect, compile-time `Send`, and real sequential-versus-rendezvous BAM/BAI equivalence tests. Five complete `--benchmark --validate` preflights on CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA retained exact canonical coverage, host counters, byte-identical output, and SHA-256. These validation-enabled runs are correctness smoke observations, not performance evidence; the full before/after/samtools campaign remains deferred and is not approved. Exact details are in **Completed bounded CPU/GPU overlap implementation and correctness checkpoint**.
+The deliverable is documentation evidence only: external elapsed and internal stage medians/ranges, baseline-versus-overlap ratios, samtools comparisons, candidate producer/consumer wait telemetry, honest CPU-contention/fill/drain interpretation, limitations, and whether overlap should be retained. Raw logs remain ephemeral under `/tmp`; no implementation or benchmark logs are committed. No following implementation slice is approved.
 
 ## Purpose of this document
 
@@ -1429,4 +1427,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-The bounded CPU/GPU overlap implementation and five-backend correctness checkpoint are complete and accepted after full-agent review. The full controlled baseline/candidate/samtools performance campaign is not approved; wait for the owner rather than inferring it as the next task.
+The controlled no-overlap/overlap/samtools performance campaign is approved and in progress under the methodology in **Current handoff**. Stop after verified measurements, `design.md` analysis, and a documentation-only clean commit; do not modify implementation or infer a subsequent optimization.
