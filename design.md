@@ -1,7 +1,7 @@
 # gpugeno design and project memory
 
 **Last updated:** 2026-09-18
-**Current phase:** the approved complete public Direct Vulkan backend slice and the owner-approved controlled three-backend HG002 performance comparison are complete. `gpugeno flagstat --backend vulkan` consumes canonical streamed batches through one synchronized grow-only Vulkan slot, matches the host oracle on the complete canonical BAM, and reports separate upload/kernel/readback timing. No next slice is approved; the fixed non-goals remain no multiple slots, overlap, pileup, CUDA packaging changes, validation-layer installation, generalized allocator, other OS work, or reference-repository edits.
+**Current phase:** the owner approved the implementation-and-correctness half of the bounded CPU/GPU overlap experiment. The selected design moves the existing `DisjointBamStream` to one named producer thread and hands batches to the main-thread consumer through `sync_channel(0)`, preserving one synchronous GPU slot while allowing construction of batch N+1 during validation/backend work for batch N. This task stops after implementation, deterministic lifecycle/equivalence tests, and five-backend correctness preflights; full before/after/samtools performance measurement is deferred until full-agent review.
 
 ## First-class fresh-agent workflow
 
@@ -41,9 +41,11 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The owner approved the complete whole-file public Direct Vulkan backend slice. This implementation promotes the focused `ash` classifier into `src/vulkan_backend.rs`, wires `gpugeno flagstat --backend vulkan`, and keeps the diagnostic example on the production module. Vulkan consumes each streamed batch's canonical `IndexedBamBatch::data` and `span_starts`, uses one synchronized grow-only resource slot, reports separate H2D/kernel/D2H timing (GPU timestamps or separately host-synchronized submissions), and rejects non-GPU/software physical devices without fallback. The explicit non-goals are the fixed list in the task handoff: no multiple slots, overlap, pileup, CUDA-free packaging, validation layers, generalized allocator, other OS work, or reference-repository edits.
+The complete public Direct Vulkan backend and controlled three-backend HG002 comparison remain the accepted baseline. The owner has now approved only the first half of the bounded overlap experiment: implementation and correctness evidence. The fixed architecture is one already-open `DisjointBamStream` moved to a named producer, a zero-capacity rendezvous channel, validation/reduction and GPU contexts retained on the main thread, explicit receiver-drop-before-producer-join cancellation, and exactly one synchronous backend resource slot. At most two complete canonical host batches may exist: the consumer's current batch and the producer-owned next batch blocked at rendezvous.
 
-The prior synthetic spike is the source of the dedicated shader and classifier semantics, but its per-call five-buffer ownership and private module are superseded by this production slice. The owner-approved controlled three-backend HG002 comparison is complete; see `Completed HG002 three-backend performance comparison` below. It made no implementation changes, and no next implementation slice is approved.
+The implementation must preserve exact batches, coverage, counters, output hash, backend timing meanings, and root errors. New benchmark-only fields must report consumer receive waits, producer rendezvous backpressure, producer lifetime, and that overlapping work sums do not add to wall. Explicit non-goals are multiple GPU slots/submissions, a buffered or unbounded queue, direct mapped decompression, backend/kernel tuning, pileup, multi-GPU, optional CUDA packaging, async runtimes, coverage-policy changes, and reference-repository edits.
+
+This approved task stops after code, deterministic normal/error/panic/backpressure/equivalence tests, repeated standard checks, and complete `--validate` correctness preflights on CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA. A full agent must review concurrency and lifetime behavior before a separate benchmark/documentation task is approved. The detailed reviewed implementation handoff is currently `/tmp/gpugeno-overlap-implementation-handoff.md`; preserve its architecture but do not run its full 11-command performance campaign in this first task.
 
 ## Purpose of this document
 
@@ -1392,4 +1394,4 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-The owner-approved controlled three-backend HG002 performance comparison is complete and documented above. The public CUDA, Direct Vulkan, and `wgpu` implementation state is unchanged, the repository contains no benchmark logs, and no next implementation slice is approved; do not infer one from deferred possibilities.
+The bounded CPU/GPU overlap implementation-and-correctness task is approved and in progress under the architecture and boundary in **Current handoff**. Stop after a clean implementation commit and correctness evidence; do not begin the deferred full performance campaign until a full-agent review accepts the concurrency work.
