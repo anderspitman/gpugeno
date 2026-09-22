@@ -1,11 +1,11 @@
-# gpugeno design and project memory
+# gpugeno project memory
 
-**Last updated:** 2026-09-21
-**Current phase:** the bounded CPU/GPU overlap implementation and its controlled performance evaluation are complete. The reviewed implementation retains one GPU slot and a strict two-host-batch rendezvous; the warm-cache comparison against the preserved no-overlap binary and samtools is documented below. No implementation changes or tuning were made in this measurement task, and no following slice is approved.
+**Last updated:** 2026-09-22
+**Current phase:** the bounded CPU/GPU overlap implementation and its controlled performance evaluation are complete. The reviewed implementation retains one GPU slot and a strict two-host-batch rendezvous; the warm-cache comparison against the preserved no-overlap binary and samtools is documented below. Project documentation is consolidated in `project.md`, which is now the sole gpugeno project document; the original pileup idea is preserved in the project goal and decision history. No following implementation slice is approved.
 
 ## First-class fresh-agent workflow
 
-This project intentionally has **no persistent coordinator agent**. `design.md` is the handoff boundary. A fresh coding agent should need only the instruction “read `design.md` and continue.” Every agent is responsible for leaving the repository and this document ready for the next fresh agent.
+This project intentionally has **no persistent coordinator agent**. `project.md` is the handoff boundary. A fresh coding agent should need only the instruction “read `project.md` and continue.” Every agent is responsible for leaving the repository and this document ready for the next fresh agent.
 
 ### Start of every agent session
 
@@ -41,7 +41,9 @@ This project intentionally has **no persistent coordinator agent**. `design.md` 
 
 ### Current handoff
 
-The bounded overlap implementation, five-backend correctness checkpoint, and controlled performance evaluation are complete. The implementation architecture and correctness evidence remain exactly as documented below; this task modified only `design.md`.
+Project documentation was consolidated without changing implementation or scope: `design.md` was renamed to `project.md`, and the redundant `idea.md` was removed after confirming that its cross-platform pileup goal, libdeflate/GPU pipeline, backend comparison, and language question were already preserved in this document. `project.md` is the sole tracked gpugeno project document.
+
+The bounded overlap implementation, five-backend correctness checkpoint, and controlled performance evaluation remain complete. The implementation architecture and correctness evidence are exactly as documented below.
 
 The comparison used preserved `/tmp/gpugeno-no-overlap-f955eea`, the reviewed candidate `/tmp/gpugeno-overlap-ed23c17`, and samtools 1.24. It covered CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA with fixed 256 MiB batches and eight decompression workers. One warmup per command and seven measured rounds interleaved all eleven commands in rotating order, one process at a time, under a warm filesystem cache. Every output and gpugeno coverage field remained exact; no measured run was discarded or replaced.
 
@@ -57,7 +59,7 @@ It must preserve three kinds of information:
 2. **Intent and rationale:** goals, constraints, interfaces, and why important choices were made.
 3. **History:** assumptions that proved wrong, approaches that were superseded, and evidence learned during implementation.
 
-This is a living design record, not a fixed long-range roadmap. The project is deliberately experimental. Only the next small slice should be treated as committed; later work should be selected after measuring and learning from that slice.
+This is a living project record, not a fixed long-range roadmap. The project is deliberately experimental. Only the next small slice should be treated as committed; later work should be selected after measuring and learning from that slice.
 
 ### How to update it
 
@@ -134,13 +136,12 @@ The root now contains a bounded streaming Rust/CUDA/Direct-Vulkan/`wgpu` flagsta
 - `cuda/gpugeno_cuda.h` and `cuda/gpugeno_cuda.cu`: public C ABI, reusable CUDA context/buffers, transfer/timing orchestration, and temporary vector-add/upload support
 - `cuda/flagstat.cuh` and `cuda/flagstat.cu`: internal launch declaration plus the flagstat classifier and bounded CUDA record-walk kernel
 - `examples/cuda_vector_add.rs`, `examples/bam_upload.rs`, and `examples/vulkan_flagstat_spike.rs`: temporary integration/regression diagnostics
-- `idea.md`: the original pileup-oriented idea
-- `design.md`: this document
+- `project.md`: this project’s sole durable document, incorporating the original pileup idea, current status, decisions, evidence, history, and future possibilities
 - `cubayes/`: a clean CuBayes reference clone
 - `libshadowfax/`: a clean experimental fork containing the CUDA flagstat implementation
 - `.gitignore`: ignores build output, local reference clones, editor swap files, and alignment/index data
 
-The root is a Git repository on branch `main`. The implementation, project metadata, and this design record are tracked. The latest implementation checkpoint is the reviewed bounded CPU/GPU overlap orchestration built on the public direct-Vulkan whole-file backend; the prior synthetic Vulkan checkpoint is preserved below as superseded history. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
+The root is a Git repository on branch `main`. The implementation, project metadata, and this project record are tracked. The latest implementation checkpoint is the reviewed bounded CPU/GPU overlap orchestration built on the public direct-Vulkan whole-file backend; the prior synthetic Vulkan checkpoint is preserved below as superseded history. `cubayes/` and `libshadowfax/` remain separate ignored reference repositories.
 
 Reference revisions and locations at the time of this update:
 
@@ -248,6 +249,7 @@ All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `w
 - [x] Implement, review, and verify the approved complete public Direct Vulkan whole-file flagstat backend.
 - [x] Implement and fully review bounded CPU/GPU overlap with a strict two-host-batch rendezvous and exact five-backend correctness evidence.
 - [x] Run the deferred controlled no-overlap/overlap/samtools performance campaign after owner approval.
+- [x] Consolidate project status, plans, history, and the original idea into the sole `project.md` document.
 
 ## Current decisions
 
@@ -1564,4 +1566,6 @@ When revisiting portable backends, preserve these general intentions unless evid
 
 ## Immediate task status
 
-The controlled no-overlap/overlap/samtools performance campaign is complete. `design.md` contains the exact 2026-09-21 run matrix, six correctness preflights, eleven warmups, 77 rotating measured invocations, independent parsing, medians/ranges, formulas, conclusions, defects, and remaining risks. Overlap is retained based on exact correctness, bounded two-host-batch memory cost, and lower external/program wall in all five combinations. This task made no implementation changes; its focused documentation-only commit is the completion boundary and no following slice is approved.
+The controlled no-overlap/overlap/samtools performance campaign remains the latest technical checkpoint. `project.md` contains the exact 2026-09-21 run matrix, six correctness preflights, eleven warmups, 77 rotating measured invocations, independent parsing, medians/ranges, formulas, conclusions, defects, and remaining risks. Overlap is retained based on exact correctness, bounded two-host-batch memory cost, and lower external/program wall in all five combinations.
+
+The documentation consolidation is complete: `design.md` was renamed to `project.md`, the already-incorporated `idea.md` was removed, and all repository references were updated. No source code, implementation decision, benchmark evidence, or project scope changed. No following slice is approved.
