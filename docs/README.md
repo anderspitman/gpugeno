@@ -1,14 +1,14 @@
 # gpugeno documentation
 
 **Last updated:** 2026-09-23
-**Current checkpoint:** Bounded CPU/GPU overlap is implemented and retained; a reviewed comparative hotspot profile now identifies canonical-batch assembly copying as the strongest narrow optimization candidate. Exact representative correctness remains established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware.
-**Current work:** The profiling investigation is complete. No subsequent implementation slice is approved.
+**Current checkpoint:** Bounded CPU/GPU overlap is implemented and retained. A reviewed comparative hotspot profile identifies canonical-batch assembly copying as the strongest narrow optimization candidate; a verified Rocky Linux 8 release build provides a glibc 2.28 deployment baseline. Exact representative correctness remains established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware.
+**Current work:** Profiling and Rocky Linux 8 release packaging are complete. No subsequent implementation slice is approved.
 
 This file is the canonical entry point for both people and coding agents. Read it completely before working in the repository. Detailed documents are intentionally not all mandatory; use the required-reading list and documentation map below.
 
 ## Current work
 
-The profiling-only comparison of samtools 1.24 and representative gpugeno paths is complete. It changed no implementation and does not approve the optimization candidate it identified. No implementation task is currently approved; do not infer one from the deferred possibilities. Present the smallest relevant options and ask the project owner one focused question at a time until a slice is selected.
+The profiling-only comparison of samtools 1.24 and representative gpugeno paths and the Rocky Linux 8 release-build workflow are complete. The profile changed no implementation and does not approve the optimization candidate it identified. The release workflow supplies an old-userspace CUDA-linked artifact, not a CUDA-free build. No further implementation task is currently approved; do not infer one from the deferred possibilities. Present the smallest relevant options and ask the project owner one focused question at a time until a slice is selected.
 
 ### Required reading
 
@@ -100,6 +100,8 @@ A controlled warm-cache campaign compared the preserved no-overlap binary, the r
 
 A subsequent reviewed hotspot investigation compared samtools, CUDA device 0, and `wgpu` on AMD adapter 0 and NVIDIA adapter 1. Both tools were decompression-dominated in CPU-active samples. Gpugeno additionally spent approximately 15–16% of flat samples in the producer's ordered copy from decompressed BGZF members into the canonical batch, while consumers continued to wait for producer completion. This supports considering a bounded direct-to-canonical or equivalent copy-removal experiment, but flat samples do not predict wall savings and safely avoiding output initialization is a separate hypothesis. See [`benchmarks.md`](benchmarks.md#comparative-samtoolsgpugeno-hotspot-profiling).
 
+A checked-in Podman release workflow now builds against Rocky Linux 8/glibc 2.28 with CUDA 12.4 and Rust 1.98.1, rejects a newer glibc requirement, and exports the executable with a checksum and toolchain/dependency record. The first build passed its linkage checks inside the Rocky Linux 8 runtime image. This solves the requested old-userspace build baseline, not the separate CUDA-free packaging gap; see [`development.md`](development.md#rocky-linux-8-compatible-release-builds).
+
 No implementation slice after this checkpoint is approved.
 
 ## Critical constraints
@@ -116,7 +118,7 @@ No implementation slice after this checkpoint is approved.
 
 ## Current known risks and deferred boundaries
 
-- CUDA compilation and linkage remain unconditional, so the nominally portable backends do not yet produce a convenient CUDA-free artifact.
+- CUDA compilation and linkage remain unconditional. The Rocky Linux 8 recipe provides an old-glibc-compatible CUDA-enabled artifact, but the nominally portable backends still do not have a CUDA-free build.
 - Complete coverage is demonstrated on the canonical HG002 chromosome 22 BAM, not every unusual or sparse BAI. An indivisible span larger than the configured cap fails clearly rather than being skipped.
 - Available Vulkan hardware exercised coherent memory and GPU timestamp paths. Non-coherent mapping and host-synchronized timing fallbacks were reviewed but not selected by the smoke devices.
 - A same-process direct-Vulkan/`wgpu` hardware-test SIGSEGV is mitigated by a crate-local test lock, not root-caused for concurrent production API use.

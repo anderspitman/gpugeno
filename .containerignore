@@ -1,0 +1,12 @@
+.git
+.gitignore
+.containerignore
+target
+dist
+cubayes
+libshadowfax
+*.swp
+*.bam
+*.bai
+*.cram
+*.crai
