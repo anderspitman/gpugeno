@@ -8,6 +8,7 @@
 
 - [HG002 three-backend performance comparison](#completed-hg002-three-backend-performance-comparison) — the controlled no-overlap baseline across five backend/device combinations; GPU-stage behavior was similar for the two portable APIs, while host feeding and startup materially affected wall time.
 - [Bounded CPU/GPU overlap implementation and performance evaluation](#bounded-cpugpu-overlap-implementation-and-performance-evaluation) — exact output was retained and all five combinations improved external elapsed and program wall, so the strict two-host-batch overlap design was retained.
+- [Comparative samtools/gpugeno hotspot profiling](#comparative-samtoolsgpugeno-hotspot-profiling) — flat CPU profiles show decompression dominates both tools and identify gpugeno's ordered canonical-batch copy as the strongest narrow optimization candidate.
 
 ## Completed HG002 three-backend performance comparison
 
@@ -278,3 +279,99 @@ Against samtools, the ratio is `candidate external median / samtools external me
 ### Remaining boundary
 
 No multiple GPU slots/submissions, buffered or unbounded queue, direct mapped decompression, backend/kernel tuning, pileup, multi-GPU, packaging change, async runtime, coverage-policy change, or reference edit was added. The known inability to force-cancel a permanently stuck native decompressor and the pre-existing BGZF worker-panic robustness caveat remain. The controlled performance campaign is complete and documented above; overlap is retained, but no subsequent implementation slice is approved.
+
+## Comparative samtools/gpugeno hotspot profiling
+
+### Conclusion and scope
+
+Completed 2026-09-23 as the owner-approved profiling-only comparison of samtools 1.24, gpugeno CUDA device 0, gpugeno `wgpu` AMD adapter 0, and gpugeno `wgpu` NVIDIA adapter 1. No implementation, parameter sweep, Direct Vulkan profile, public-interface change, or reference-repository edit was included.
+
+Both samtools and gpugeno are decompression-dominated in CPU-active samples on the canonical workload. The strongest gpugeno-specific target is the ordered copy from worker-owned decompressed BGZF members into the canonical `PendingBatch.data`: it accounted for approximately 15–16% of flat process samples on every gpugeno path, and existing overlap telemetry independently shows that next-batch production remains exposed on the critical path. This supports proposing a narrow copy-removal experiment; it does **not** predict a wall-time improvement.
+
+The worker's zero-filled decompression output is a separate, smaller hypothesis. Worker-side `memset` accounted for approximately 6% of process samples, but safely avoiding initialization may require a different ownership/raw-libdeflate design than merely eliminating the assembly copy. The full `memcpy`/`memset` totals are not removable work: `wgpu` has a separate mapped-staging copy, and compressed-member input construction contributes additional initialization.
+
+### Profiling facilities and method
+
+`perf`, Valgrind/Callgrind, GDB-family stack tools, `strace`, eBPF profilers, `uftrace`, and comparable CPU profilers were absent. Kernel policy was `perf_event_paranoid=3`. Nsight Systems 2026.1.3 reported both `perf_event_open` and CPU sampling unavailable, so it could not provide CPU instruction-pointer or call-stack samples without a policy or privilege change. No installation, `sudo`, or policy change was attempted.
+
+The campaign therefore used two complementary sources:
+
+1. A campaign-local `LD_PRELOAD` profiler installed process-wide `ITIMER_PROF`/`SIGPROF`, captured x86-64 instruction pointers and thread IDs into preallocated storage, and symbolized against final process mappings after exit. It was validated on balanced and deliberately asymmetric multi-thread fixtures. This provides repeated **flat CPU-active sample shares**, not call stacks, blocked time, absolute CPU accounting, or wall attribution.
+2. Nsight Systems ran with CPU sampling disabled and OS-runtime tracing enabled. Its long-wait stacks were used only to interpret blocking and worker/driver activity, not as compute profiles or additive wall-time totals.
+
+The sampler's material limitations are part of the result. Process-wide signals can coalesce and their thread delivery is statistical; requested periods of 1,000 microseconds in round one and 250 microseconds in rounds two and three still produced similar sample counts. The handler's libc `syscall(SYS_gettid)` is not guaranteed POSIX async-signal-safe, teardown has a latent race with an already-running handler, and final-map symbolization cannot reliably cover unloaded/JIT mappings or address reuse. No malformed or dropped campaign record was observed, leading shares were stable across rounds, and two validation fixtures supported coarse thread attribution. The Python resource wrapper also inherited the preload and output path; the target won the exclusive output creation in every retained run, but a target crash could have made this setup misleading. Future use should preload the target directly and record period/PID in the sample header.
+
+The optimized symbolized gpugeno artifact was built from `a984568deb1a0348f8595e48102c375fbd7823b1` with release optimization, full debuginfo, no stripping, forced frame pointers, and an external `nvcc` wrapper adding device line information plus host debug/frame-pointer flags:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+CARGO_TARGET_DIR=/tmp/gpugeno-profile-20260922-lead/build-symbolized \
+CARGO_INCREMENTAL=0 \
+CARGO_PROFILE_RELEASE_DEBUG=2 \
+CARGO_PROFILE_RELEASE_STRIP=none \
+RUSTFLAGS="-C force-frame-pointers=yes" \
+NVCC=/tmp/gpugeno-profile-20260922-lead/artifact/nvcc-profile-wrapper \
+  cargo build --release --bin gpugeno
+```
+
+The retained ephemeral artifact was `/tmp/gpugeno-profile-20260922-lead/artifact/gpugeno-profile`, SHA-256 `4b716c2d4a63547ba1251d85aaf0ea75294fa4f604f5a0ad5a9bac90181fc637`. Its debug/frame-pointer configuration differs from the controlled performance binary, so elapsed observations from this campaign are smoke context only and are not merged with the earlier performance tables.
+
+The exact target commands were:
+
+```bash
+INPUT=/agents/shadowfax/data/HG002_chr22.bam
+BIN=/tmp/gpugeno-profile-20260922-lead/artifact/gpugeno-profile
+
+/usr/local/bin/samtools flagstat -@ 8 "$INPUT"
+"$BIN" flagstat "$INPUT" --backend cuda --device 0 \
+  --max-uncompressed-bytes 268435456 --threads 8 --benchmark
+"$BIN" flagstat "$INPUT" --backend wgpu --device 0 \
+  --max-uncompressed-bytes 268435456 --threads 8 --benchmark
+"$BIN" flagstat "$INPUT" --backend wgpu --device 1 \
+  --max-uncompressed-bytes 268435456 --threads 8 --benchmark
+```
+
+Commands ran serially in the listed order: one unprofiled warmup/preflight per command, three flat-profile rounds per command, then one supplemental Nsight OS-runtime trace per command. The flat-profile periods were recorded in the campaign narrative but not embedded in each raw header or per-run command record, a reproducibility defect. Raw logs, profiler source, analysis, and traces are ephemeral under `/tmp/gpugeno-profile-20260922-lead`; the profiler shared-object SHA-256 was `11b24cc7c3dfc31f8538b0f62ac5ee1f3c0a3d98496f6109810c746b6b15c5f1`.
+
+### Correctness and flat hotspot evidence
+
+All 20 target invocations—four preflights, twelve flat profiles, and four OS-runtime traces—produced the established stdout SHA-256:
+
+```text
+dae9929278b2da62aec0393030a63dfcafa32a26dfd218242c037075c98cf113
+```
+
+All saved gpugeno stderr retained 20 batches, 2,284 spans, 2,285 anchors, 82,360 decompressed blocks, 5,324,198,102 logical bytes, and 1,645,336,143 compressed bytes read. The 16 preflight/flat wrapper records explicitly contain status zero; complete reports, empty collection stderr, complete target stderr, and exact target output establish successful completion of the four Nsight rows, though they lack separate captured target-status files.
+
+The table aggregates three flat-profile rounds per command. Percentages are exclusive flat leaf/module shares of retained CPU-active samples.
+
+| command | retained samples | dominant evidence |
+|---|---:|---|
+| samtools 1.24 | 4,516 | libz module 92.45%; unresolved internal libz 74.71%; exported `crc32_z` 17.03%; samtools executable 1.99%; `flagstat_loop` 0.31% |
+| gpugeno CUDA 0 | 3,034 | `deflate_decompress_bmi2` 46.04%; all `memcpy` 15.43%; all `memset` 8.73%; libcuda module 6.03% |
+| gpugeno `wgpu` AMD 0 | 3,026 | `deflate_decompress_bmi2` 43.82%; all `memcpy` 20.29%; all `memset` 8.82% |
+| gpugeno `wgpu` NVIDIA 1 | 3,047 | `deflate_decompress_bmi2` 44.77%; all `memcpy` 19.72%; all `memset` 8.07% |
+
+Samtools' system libz was stripped, so module attribution is stronger than its unresolved internal function labels. Gpugeno's libdeflate leaf was stable at 42.20–48.49% across paths and rounds. It is real work in the optimized BMI2 path, not evidence of an obvious local classifier defect or a reason to replace libdeflate.
+
+Thread-role attribution used creation order, raw TID patterns, source-level function mix, and independent named-thread evidence from Nsight. It separates the actionable shared copy from unrelated memory work:
+
+| path | worker output `memset` / all samples | producer `memcpy` / all samples | producer `memset` / all samples | `wgpu` main `memcpy` / all samples |
+|---|---:|---:|---:|---:|
+| CUDA | 6.66% | 15.23% | 2.08% | — |
+| `wgpu` AMD | 6.35% | 15.66% | 2.12% | 4.53% |
+| `wgpu` NVIDIA | 5.81% | 15.43% | 1.84% | 4.00% |
+
+Source inspection matches these roles. `decompress_member` creates `vec![0u8; member.uncompressed_len]`; `DisjointBamStream::store_completed` then appends each ordered retained member slice with `pending.data.extend_from_slice(source)`. Separately, compressed input framing grows a member buffer with `resize(member_len, 0)` before `read_exact_at`, and `wgpu` copies canonical bytes into mapped staging memory. The roughly 5.324 GB canonical assembly volume makes the producer attribution strong, but without sampled call stacks it remains source-correlated caller inference.
+
+Profiled gpugeno runs reported 866.872–1,340.142 ms of summed `consumer_next_batch_wait`. The prior controlled overlap campaign's corresponding medians for the same three profiled paths were 870.259–1,158.690 ms. These observations establish that producer completion is exposed for nonzero intervals; they do not show how much of that wait comes from the copy or convert overlapping work sums into a wall-time estimate.
+
+Nsight's long OS-runtime events were dominated by samtools thread-pool condition waits and gpugeno worker/driver futex or condition waits. Corrected event totals were 4,356 samtools, 33,748 CUDA, 37,851 `wgpu` AMD, and 25,815 `wgpu` NVIDIA. Because durations sum across threads, much of this is expected parked-worker and driver-helper activity. It is not evidence for removing synchronization or for a lock-contention optimization.
+
+### Recommendation and boundaries
+
+A future owner-approved experiment may test eliminating the ordered member-to-`PendingBatch.data` assembly copy through direct writes into provably disjoint regions of an eventual canonical allocation, or an equivalently bounded design. Avoiding worker output initialization must be specified and measured as a separate sub-hypothesis rather than assumed to follow from copy removal.
+
+Any design must preserve the strict two-complete-canonical-batch bound, deterministic canonical bytes/spans/block maps, one GPU resource slot, cap and terminal-member behavior, decompression-error safety, and producer cancellation/join protocol. No partially initialized bytes may become visible after failure, panic, or cancellation. Relevant tests include first-member nonzero offsets, terminal truncation inside a member, out-of-order completion, oversized spans, decompression failure, consumer cancellation, and exact sequential/producer equivalence. Explicit bytes/time telemetry should distinguish canonical assembly, destination initialization, and work merely moved elsewhere.
+
+Flat CPU shares cannot be converted into Amdahl estimates under parallel workers, CPU/GPU overlap, and memory-bandwidth contention. The profiles do not support GPU/classifier tuning, worker-count changes, synchronization removal, or libdeflate replacement. No further profiling is required before deciding whether to approve the narrow design experiment, but that implementation is not approved by this campaign.

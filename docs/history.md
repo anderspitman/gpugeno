@@ -37,6 +37,7 @@
 - [x] Run the deferred controlled no-overlap/overlap/samtools performance campaign after owner approval.
 - [x] Consolidate project status, plans, history, and the original idea into the sole `project.md` document.
 - [x] Replace the monolithic project record with `AGENTS.md` and a small routed `docs/` set for human-readable progressive disclosure.
+- [x] Profile samtools and representative CUDA/`wgpu` paths, independently review the evidence, and identify bounded canonical-batch copy removal as the strongest narrow optimization candidate.
 
 ## Superseded candidate: GPU per-block byte sums
 
@@ -162,9 +163,15 @@ The prototype was initially called `sfxproto`. Before application code was creat
 - Initial performance corpus is `HG002_chr22.bam`.
 - Program name is `gpugeno`, and flagstat is a subcommand to leave room for later operations.
 
+### Comparative hotspot profiling outcome
+
+Standard CPU call-stack profiling was blocked by missing tools and host policy, so the approved investigation used a validated campaign-local flat CPU sampler plus Nsight OS-runtime traces. Samtools and gpugeno were both decompression-dominated on the canonical input. Gpugeno also showed a stable producer-side canonical assembly copy at roughly 15–16% of CPU-active flat samples, while overlap telemetry continued to show consumer waits for producer completion. Independent review confirmed the attribution and narrowed the conclusion: `wgpu` staging copies and some initialization are separate work, flat shares are not wall-time savings, and safely avoiding worker-output initialization is distinct from removing the ordered assembly copy.
+
+This completed the profiling question without changing implementation. A bounded direct-to-canonical or equivalent copy-removal design is now evidence-supported as a possible experiment, but it requires explicit owner approval and ownership/lifetime review before implementation. The detailed method, corrections, and limitations are in [`benchmarks.md`](benchmarks.md#comparative-samtoolsgpugeno-hotspot-profiling).
+
 ## Deferred possibilities, not a committed roadmap
 
-Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, actual AMD/Vulkan validation, the complete public direct-Vulkan backend, the bounded overlap implementation/correctness checkpoint, and its controlled performance evaluation are complete, plausible later experiments include optional CUDA packaging, pileup, or backend tuning. None is currently approved.
+Now that CUDA, native `wgpu`, bounded parallel decompression, raw-upload/resource reuse, actual AMD/Vulkan validation, the complete public direct-Vulkan backend, bounded overlap and its controlled evaluation, and comparative hotspot profiling are complete, plausible later experiments include bounded canonical-batch copy removal, optional CUDA packaging, pileup, or backend tuning. None is currently approved.
 
 When revisiting portable backends, preserve these general intentions unless evidence changes them:
 

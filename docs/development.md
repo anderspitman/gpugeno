@@ -27,6 +27,8 @@ Observed on 2026-09-15:
 
 The later controlled campaigns found two CUDA-visible RTX 3060 devices rather than the earlier three; device 0 remained available. They also found samtools 1.24 at `/usr/local/bin/samtools`. Treat device counts and tool visibility as dated observations and enumerate them again before a new campaign.
 
+Observed during comparative profiling on 2026-09-23: `perf` and the usual alternative CPU profilers were absent, `kernel.perf_event_paranoid` was 3, and Nsight Systems 2026.1.3 at `/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/nsys` reported CPU sampling unavailable. The campaign therefore used a limited validated flat sampler; its method and cautions are in [`benchmarks.md`](benchmarks.md#comparative-samtoolsgpugeno-hotspot-profiling). Recheck tool availability and policy before future profiling rather than assuming this restriction is permanent.
+
 The canonical initial real-world input is:
 
 - `/agents/shadowfax/data/HG002_chr22.bam` — 1,635,811,603 bytes

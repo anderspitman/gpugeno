@@ -1,16 +1,14 @@
 # gpugeno documentation
 
-**Last updated:** 2026-09-22
-**Current checkpoint:** Bounded CPU/GPU overlap is implemented, reviewed, and retained after a controlled comparison of five backend/device combinations. Exact representative correctness is established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware.
-**Current work:** The documentation reorganization is complete. No subsequent implementation slice is approved.
+**Last updated:** 2026-09-23
+**Current checkpoint:** Bounded CPU/GPU overlap is implemented and retained; a reviewed comparative hotspot profile now identifies canonical-batch assembly copying as the strongest narrow optimization candidate. Exact representative correctness remains established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware.
+**Current work:** The profiling investigation is complete. No subsequent implementation slice is approved.
 
 This file is the canonical entry point for both people and coding agents. Read it completely before working in the repository. Detailed documents are intentionally not all mandatory; use the required-reading list and documentation map below.
 
 ## Current work
 
-The project record is organized as this short shared entry point plus routed architecture, development, semantic, experiment, benchmark, and history documents. The reorganization changed no source code, implementation decision, or project scope.
-
-No implementation task is currently approved. Do not infer one from the deferred possibilities. Present the smallest relevant options and ask the project owner one focused question at a time until a slice is selected.
+The profiling-only comparison of samtools 1.24 and representative gpugeno paths is complete. It changed no implementation and does not approve the optimization candidate it identified. No implementation task is currently approved; do not infer one from the deferred possibilities. Present the smallest relevant options and ask the project owner one focused question at a time until a slice is selected.
 
 ### Required reading
 
@@ -100,6 +98,8 @@ The latest technical checkpoint is the reviewed bounded CPU/GPU overlap orchestr
 
 A controlled warm-cache campaign compared the preserved no-overlap binary, the reviewed overlap candidate, and samtools 1.24 across CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA. All outputs and coverage fields remained exact. Every candidate row improved both external elapsed and program wall, so overlap is retained despite increased batch-building, host-staging, and some GPU-stage work under contention. See [`benchmarks.md`](benchmarks.md#bounded-cpugpu-overlap-implementation-and-performance-evaluation).
 
+A subsequent reviewed hotspot investigation compared samtools, CUDA device 0, and `wgpu` on AMD adapter 0 and NVIDIA adapter 1. Both tools were decompression-dominated in CPU-active samples. Gpugeno additionally spent approximately 15–16% of flat samples in the producer's ordered copy from decompressed BGZF members into the canonical batch, while consumers continued to wait for producer completion. This supports considering a bounded direct-to-canonical or equivalent copy-removal experiment, but flat samples do not predict wall savings and safely avoiding output initialization is a separate hypothesis. See [`benchmarks.md`](benchmarks.md#comparative-samtoolsgpugeno-hotspot-profiling).
+
 No implementation slice after this checkpoint is approved.
 
 ## Critical constraints
@@ -122,7 +122,8 @@ No implementation slice after this checkpoint is approved.
 - A same-process direct-Vulkan/`wgpu` hardware-test SIGSEGV is mitigated by a crate-local test lock, not root-caused for concurrent production API use.
 - Cancellation cannot forcibly interrupt a native libdeflate call that is permanently stuck; producer join waits for the active bounded call to return or unwind.
 - The portable overlap candidates remained slower than samtools in the controlled warm-cache comparison, although all improved materially over their no-overlap baselines.
-- Pileup, CUDA-free packaging, backend tuning, multiple GPU slots, multi-GPU operation, direct mapped decompression, and broader format compatibility remain possible future experiments, not approved work.
+- Host policy and missing tools blocked standard CPU call-stack sampling in the comparative profile. A validated campaign-local flat sampler provided stable coarse attribution, not call stacks or predicted wall savings; its limitations and the independent review are recorded with the evidence.
+- Pileup, CUDA-free packaging, backend tuning, multiple GPU slots, multi-GPU operation, direct-to-canonical decompression/copy removal, broader format compatibility, and other profiling-guided optimizations remain possible future experiments, not approved work.
 
 Read the linked architecture, benchmark, or history section before acting on one of these boundaries.
 
