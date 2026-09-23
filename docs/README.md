@@ -1,7 +1,7 @@
 # gpugeno documentation
 
-**Last updated:** 2026-09-22
-**Current checkpoint:** Bounded CPU/GPU overlap is implemented, reviewed, and retained after a controlled comparison of five backend/device combinations. Exact representative correctness is established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware.
+**Last updated:** 2026-09-23
+**Current checkpoint:** Bounded CPU/GPU overlap is implemented, reviewed, and retained after a controlled comparison of five backend/device combinations. Exact representative correctness is established for CUDA, Direct Vulkan, and native `wgpu` on NVIDIA and AMD hardware. A verified Rocky Linux 8 release build now provides the glibc 2.28 deployment baseline.
 **Current work:** The documentation reorganization is complete. No subsequent implementation slice is approved.
 
 This file is the canonical entry point for both people and coding agents. Read it completely before working in the repository. Detailed documents are intentionally not all mandatory; use the required-reading list and documentation map below.
@@ -100,6 +100,8 @@ The latest technical checkpoint is the reviewed bounded CPU/GPU overlap orchestr
 
 A controlled warm-cache campaign compared the preserved no-overlap binary, the reviewed overlap candidate, and samtools 1.24 across CUDA/NVIDIA, Direct Vulkan AMD/NVIDIA, and `wgpu` AMD/NVIDIA. All outputs and coverage fields remained exact. Every candidate row improved both external elapsed and program wall, so overlap is retained despite increased batch-building, host-staging, and some GPU-stage work under contention. See [`benchmarks.md`](benchmarks.md#bounded-cpugpu-overlap-implementation-and-performance-evaluation).
 
+A checked-in Podman release workflow now builds against Rocky Linux 8/glibc 2.28 with CUDA 12.4 and Rust 1.98.1, rejects a newer glibc requirement, and exports the executable with a checksum and toolchain/dependency record. The first build passed its linkage checks inside the Rocky Linux 8 runtime image. This solves the requested old-userspace build baseline, not the separate CUDA-free packaging gap; see [`development.md`](development.md#rocky-linux-8-compatible-release-builds).
+
 No implementation slice after this checkpoint is approved.
 
 ## Critical constraints
@@ -116,7 +118,7 @@ No implementation slice after this checkpoint is approved.
 
 ## Current known risks and deferred boundaries
 
-- CUDA compilation and linkage remain unconditional, so the nominally portable backends do not yet produce a convenient CUDA-free artifact.
+- CUDA compilation and linkage remain unconditional. The Rocky Linux 8 recipe provides an old-glibc-compatible CUDA-enabled artifact, but the nominally portable backends still do not have a CUDA-free build.
 - Complete coverage is demonstrated on the canonical HG002 chromosome 22 BAM, not every unusual or sparse BAI. An indivisible span larger than the configured cap fails clearly rather than being skipped.
 - Available Vulkan hardware exercised coherent memory and GPU timestamp paths. Non-coherent mapping and host-synchronized timing fallbacks were reviewed but not selected by the smoke devices.
 - A same-process direct-Vulkan/`wgpu` hardware-test SIGSEGV is mitigated by a crate-local test lock, not root-caused for concurrent production API use.

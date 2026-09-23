@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1
+
+# Build against the oldest supported GNU/Linux userspace. The CUDA image is
+# Rocky Linux 8.9 with glibc 2.28 and contains nvcc plus the CUDA 12.4 headers.
+ARG CUDA_VERSION=12.4.1
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-rockylinux8 AS builder
+
+ARG CUDA_VERSION
+ARG RUST_TOOLCHAIN=1.98.1
+
+RUN dnf install -y \
+        binutils \
+        ca-certificates \
+        curl \
+        gcc \
+        gcc-c++ \
+        make \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+
+ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:${PATH} \
+    CUDA_HOME=/usr/local/cuda \
+    NVCC=/usr/local/cuda/bin/nvcc
+
+WORKDIR /src
+
+# Resolve the locked dependency graph in its own cacheable layer.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+    && printf '%s\n' 'fn main() {}' > src/main.rs \
+    && cargo fetch --locked \
+    && rm -rf src
+
+# Copy only inputs used by the release build; .containerignore keeps local
+# artifacts and the read-only reference repositories out of the build context.
+COPY build.rs ./
+COPY cuda ./cuda
+COPY src ./src
+COPY examples ./examples
+
+RUN cargo build --release --locked --bin gpugeno
+
+ARG GPUGENO_SOURCE_REVISION=unknown
+ARG GPUGENO_SOURCE_STATE=unknown
+
+# Fail the image build if a future dependency or toolchain raises the release
+# binary above Rocky Linux 8's glibc 2.28 ABI ceiling.
+RUN set -eux; \
+    binary=/src/target/release/gpugeno; \
+    max_glibc="$(readelf --version-info "${binary}" \
+        | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+        | sed 's/^GLIBC_//' \
+        | sort -Vu \
+        | tail -n 1)"; \
+    test -n "${max_glibc}"; \
+    test "$(printf '%s\n%s\n' '2.28' "${max_glibc}" | sort -V | tail -n 1)" = '2.28'; \
+    readelf -d "${binary}" | grep -q 'Shared library: \[libcudart.so.12\]'; \
+    mkdir -p /opt/gpugeno-release; \
+    install -m 0755 "${binary}" /opt/gpugeno-release/gpugeno; \
+    { \
+        echo 'release_target=rockylinux8-x86_64'; \
+        echo "maximum_required_glibc=GLIBC_${max_glibc}"; \
+        echo "rust_toolchain=${RUST_TOOLCHAIN}"; \
+        echo "cuda_image_version=${CUDA_VERSION}"; \
+        echo "source_revision=${GPUGENO_SOURCE_REVISION}"; \
+        echo "source_tree=${GPUGENO_SOURCE_STATE}"; \
+        echo "cargo_lock_sha256=$(sha256sum Cargo.lock | cut -d ' ' -f 1)"; \
+        rustc -Vv; \
+        cargo -V; \
+        nvcc --version; \
+        echo 'dynamic_dependencies:'; \
+        readelf -d "${binary}" | grep NEEDED; \
+    } > /opt/gpugeno-release/release-info.txt
+
+# This final stage is both a runnable image and an artifact carrier for
+# scripts/build-rocky8-release.sh. GPU access still depends on the host's
+# driver and container-device configuration.
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-rockylinux8 AS release
+
+RUN dnf install -y --setopt=install_weak_deps=False libstdc++ vulkan-loader \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY --from=builder /opt/gpugeno-release/gpugeno /usr/local/bin/gpugeno
+COPY --from=builder /opt/gpugeno-release /opt/gpugeno-release
+
+ENTRYPOINT ["/usr/local/bin/gpugeno"]

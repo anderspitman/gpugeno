@@ -49,6 +49,8 @@ The root now contains a bounded streaming Rust/CUDA/Direct-Vulkan/`wgpu` flagsta
 - `cuda/gpugeno_cuda.h` and `cuda/gpugeno_cuda.cu`: public C ABI, reusable CUDA context/buffers, transfer/timing orchestration, and temporary vector-add/upload support
 - `cuda/flagstat.cuh` and `cuda/flagstat.cu`: internal launch declaration plus the flagstat classifier and bounded CUDA record-walk kernel
 - `examples/cuda_vector_add.rs`, `examples/bam_upload.rs`, and `examples/vulkan_flagstat_spike.rs`: temporary integration/regression diagnostics
+- `packaging/rockylinux8/Containerfile` and `scripts/build-rocky8-release.sh`: version-pinned Rocky Linux 8/CUDA/Rust release environment, ABI/dependency gate, runtime image, and exported executable/checksum/metadata workflow
+- `.containerignore`: excludes local outputs, data, Git state, and reference repositories from container build contexts
 - `AGENTS.md`: repository workflow and documentation-maintenance instructions for coding agents
 - `docs/README.md`: mandatory shared entry point with the current checkpoint, current work, constraints, risks, and reading routes
 - `docs/architecture.md`, `docs/development.md`, `docs/flagstat.md`, `docs/experiments.md`, `docs/benchmarks.md`, and `docs/history.md`: progressively disclosed current reference, evidence, and history
@@ -71,6 +73,7 @@ Reference revisions and locations at the time of this update:
 - **Decided:** Match the useful flagstat behavior closely; do not reproduce accidental bugs in the old stream wrappers.
 - **Decided:** Default result output should look like `samtools flagstat`.
 - **Observed:** The canonical `HG002_chr22.bam` flagstat output is byte-identical to samtools 1.24 and all three GPU backends. Broader version/corpus compatibility remains deferred; canonical agreement does not establish every samtools edge case.
+- **Decided:** Portable release builds target the x86-64 Rocky Linux 8/glibc 2.28 userspace baseline through the checked-in Podman recipe. The build has an explicit `GLIBC_2.28` ceiling check and records its toolchain/dependencies, but remains CUDA 12-linked and compiled for the CUDA `sm_86`/`compute_86` target rather than being a CUDA-free or universal-GPU artifact. Detailed build and deployment instructions live in [`development.md`](development.md#rocky-linux-8-compatible-release-builds).
 
 ## Input, batching, and overlap
 

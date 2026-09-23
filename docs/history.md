@@ -37,6 +37,7 @@
 - [x] Run the deferred controlled no-overlap/overlap/samtools performance campaign after owner approval.
 - [x] Consolidate project status, plans, history, and the original idea into the sole `project.md` document.
 - [x] Replace the monolithic project record with `AGENTS.md` and a small routed `docs/` set for human-readable progressive disclosure.
+- [x] Add and verify a Podman-based x86-64 Rocky Linux 8 release build with an enforced glibc 2.28 ceiling and exported release metadata.
 
 ## Superseded candidate: GPU per-block byte sums
 
@@ -161,6 +162,10 @@ The prototype was initially called `sfxproto`. Before application code was creat
 - Single GPU now; multi-GPU deferred despite three available GPUs.
 - Initial performance corpus is `HG002_chr22.bam`.
 - Program name is `gpugeno`, and flagstat is a subcommand to leave room for later operations.
+
+### Rocky Linux 8 release packaging
+
+The first checked-in release workflow builds the complete CUDA-linked executable inside an x86-64 NVIDIA CUDA 12.4.1 Rocky Linux 8 container with Rust 1.98.1 and the locked Cargo graph. It enforces the Rocky Linux 8 `GLIBC_2.28` ceiling during the image build and exports a checksum plus toolchain/dependency metadata. The first verified artifact resolved all dynamic dependencies in the matching Rocky Linux 8 runtime image and retained the intended CUDA `sm_86` cubins and `compute_86` PTX. This addresses old-userspace ABI compatibility without changing program semantics or claiming CUDA-free packaging; current commands and runtime constraints are maintained in [`development.md`](development.md#rocky-linux-8-compatible-release-builds).
 
 ## Deferred possibilities, not a committed roadmap
 

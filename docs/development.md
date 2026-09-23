@@ -8,6 +8,7 @@
 
 - [Development machine and canonical input](#development-machine-and-canonical-input)
 - [Reproduce the current checkpoint](#reproduce-the-current-checkpoint)
+- [Rocky Linux 8-compatible release builds](#rocky-linux-8-compatible-release-builds)
 - [Platform and devices](#platform-and-devices)
 - [Benchmark meaning](#benchmark-meaning)
 - [Testing](#testing)
@@ -92,6 +93,47 @@ cargo run --release -- flagstat \
 ```
 
 All commands passed at the current checkpoint. `gpugeno flagstat` defaults to `wgpu`; `cuda`, `vulkan`, and `wgpu` are all explicit public backend choices, with Vulkan selecting a physical-device enumeration index and refusing CPU/software devices. The examples are temporary integration/regression diagnostics.
+
+## Rocky Linux 8-compatible release builds
+
+The supported portable-release baseline is currently **x86-64 Rocky Linux 8 with glibc 2.28, CUDA 12.4, and a CUDA `sm_86`/`compute_86` code target**. Here, “portable” means that the executable is linked against the Rocky Linux 8 userspace ABI rather than the newer development-host ABI. It does not yet mean CUDA-free or GPU-architecture-independent: CUDA compilation/linkage remains unconditional, the executable requires `libcudart.so.12` even when a portable backend is selected, and `build.rs` still emits only `sm_86` cubins plus `compute_86` PTX.
+
+[`packaging/rockylinux8/Containerfile`](../packaging/rockylinux8/Containerfile) uses the NVIDIA CUDA 12.4.1 Rocky Linux 8 development image, Rust 1.98.1, and the locked Cargo graph. Pulling NVIDIA's base image is subject to the NVIDIA Deep Learning Container License displayed by that image. The image build fails if the resulting executable requires a glibc symbol newer than `GLIBC_2.28` or no longer records `libcudart.so.12` as a dynamic dependency. No GPU is needed to compile. The final local image is also based on the matching Rocky Linux 8 CUDA runtime and contains the Vulkan loader, but the exported executable is the primary release artifact.
+
+Build and export it from the repository root with Podman:
+
+```bash
+./scripts/build-rocky8-release.sh
+```
+
+The default output is ignored by Git and contains:
+
+```text
+dist/rockylinux8-x86_64/gpugeno
+dist/rockylinux8-x86_64/gpugeno.sha256
+dist/rockylinux8-x86_64/release-info.txt
+```
+
+The wrapper also leaves the runnable local image `localhost/gpugeno-release:rockylinux8`. Pass one positional path to select another output directory. `GPUGENO_RELEASE_IMAGE` overrides the image tag, and `GPUGENO_PODMAN_BUILD_ARGS` supplies simple whitespace-separated extra build flags such as `--pull=always`. `release-info.txt` records the Git revision, whether the source tree was dirty, the Cargo lockfile digest, compiler versions, glibc ceiling, and direct dynamic dependencies. Normal rootless Podman needs no privilege. In a restricted nested environment where user namespaces are unavailable but non-interactive sudo is authorized, use:
+
+```bash
+GPUGENO_PODMAN_SUDO=1 ./scripts/build-rocky8-release.sh
+```
+
+Verify the exported checksum from inside its directory because the checksum deliberately contains only the artifact basename:
+
+```bash
+(
+  cd dist/rockylinux8-x86_64
+  sha256sum -c gpugeno.sha256
+)
+```
+
+Before deployment, run `ldd ./gpugeno` on the destination and require every dependency to resolve. A native Rocky Linux 8 destination needs the matching CUDA 12 runtime (`libcudart.so.12`) and `libstdc++`; with NVIDIA's RHEL 8 CUDA repository configured, the relevant packages are normally `cuda-cudart-12-4` and `libstdc++`. CUDA execution additionally needs an NVIDIA driver compatible with CUDA 12.4 and either an `sm_86` GPU or a newer architecture on which the driver can JIT the embedded `compute_86` PTX. Direct Vulkan or `wgpu` execution needs `libvulkan.so.1` (normally `vulkan-loader`) and a hardware Vulkan ICD; the direct backend requires Vulkan 1.1. The NVIDIA driver does not by itself provide the CUDA runtime. Install the runtime package or configure the dynamic loader to find `/usr/local/cuda-12.4/lib64`.
+
+The container build deliberately does not run `cargo test`: the complete suite contains hardware tests requiring real Vulkan adapters. Continue to run the normal verification suite on a GPU-equipped development host, then smoke-test the exported executable on the actual Rocky Linux 8 destination with the intended backend and representative BAM/BAI input.
+
+The first verified container build on 2026-09-23 produced a 7.7 MiB executable whose maximum required glibc symbol was `GLIBC_2.28`. `ldd` resolved all dependencies inside the Rocky Linux 8.9 runtime image, a no-argument launch reached the CLI usage error normally, and `cuobjdump` showed the two expected `sm_86` cubins and two `compute_86` PTX payloads. The exported executable also completed the canonical CUDA/device-0 `--validate` run on the development host with the exact established counters. This establishes the artifact's build/linkage and one representative CUDA execution; a smoke test on the actual destination is still required.
 
 ## Platform and devices
 
